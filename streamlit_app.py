@@ -74,15 +74,25 @@ def clean_holdings(df):
     df = df.copy()
     # Normalize column names
     df.columns = [c.strip() for c in df.columns]
-    # Common columns
-    rename_map = {"Weight %": "Weight_Percent"}
-    for k, v in rename_map.items():
-        if k in df.columns and v not in df.columns:
-            df = df.rename(columns={k: v})
+
+    # Standardize weight column name
+    if "Weight_Percent" not in df.columns and "Weight %" in df.columns:
+        df = df.rename(columns={"Weight %": "Weight_Percent"})
+
     # Coerce numeric
     if "Weight_Percent" in df:
         df["Weight_Percent"] = pd.to_numeric(df["Weight_Percent"], errors="coerce")
+
+        # --- KEY FIX: normalize to FRACTIONS (0–1) per ETF ---
+        # If an ETF's median weight > 1, it’s in percent (0–100) → divide by 100.
+        med = df.groupby("ETF")["Weight_Percent"].median()
+        percent_scale = med[med > 1].index
+        df.loc[df["ETF"].isin(percent_scale), "Weight_Percent"] = (
+            df.loc[df["ETF"].isin(percent_scale), "Weight_Percent"] / 100.0
+        )
+
     return df
+
 
 # Sidebar — file input
 
