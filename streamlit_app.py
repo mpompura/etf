@@ -255,10 +255,13 @@ else:
 
 left, right = st.columns(2)
 
-# Treemap by Industry (Plotly)
+# Treemap by Industry (Plotly) — mobile-friendly labels
 with left:
     if {"ETF", "Industry", "Weight_Percent"}.issubset(holdings_f.columns):
         st.markdown("**Industry Composition (Treemap)**")
+
+        # Toggle for small screens
+        mobile_mode = st.checkbox("Mobile-friendly labels", value=True, key="treemap_mobile_toggle")
 
         treemap = px.treemap(
             holdings_f,
@@ -267,20 +270,37 @@ with left:
             hover_data=["Ticker", "Holding"] if {"Ticker", "Holding"}.issubset(holdings_f.columns) else None,
         )
 
-        # ✨ Bigger, clearer text + consistent hover info
-        treemap.update_traces(
-            textinfo="label+percent entry",
-            textfont=dict(size=18, color="black"),  # 🔹 increase font size here
-            hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>'
-        )
+        # 1) Hide cluttered labels automatically, keep hover clean
+        # 2) In mobile mode, show only ETF + industry percent (no tiny leaf text walls)
+        if mobile_mode:
+            # Show label+percent for each box relative to its parent, cap depth to keep it readable
+            treemap.update_traces(
+                textinfo="label+percent parent",
+                maxdepth=2,                    # ETF + Industry only
+                textfont=dict(size=16),
+                hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>'
+            )
+            treemap.update_layout(
+                uniformtext=dict(minsize=12, mode="hide"),  # auto-hide cramped labels
+                margin=dict(t=30, l=0, r=0, b=0),
+                treemapcolorway=None
+            )
+        else:
+            # Desktop/full labels (still guarded to avoid overlaps)
+            treemap.update_traces(
+                textinfo="label+percent entry",
+                textfont=dict(size=18),
+                hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>'
+            )
+            treemap.update_layout(
+                uniformtext=dict(minsize=12, mode="hide"),
+                margin=dict(t=30, l=0, r=0, b=0),
+            )
 
-        treemap.update_layout(
-            uniformtext=dict(minsize=12, mode="show"),
-            margin=dict(t=30, l=0, r=0, b=0),
-        )
+        # Optional: remove the breadcrumb bar to save vertical space
+        treemap.update_layout(pathbar=dict(visible=False))
 
         st.plotly_chart(treemap, use_container_width=True)
-
 # Stacked bar by Country
 with right:
     if {"ETF", "Country", "Weight_Percent"}.issubset(holdings_f.columns):
