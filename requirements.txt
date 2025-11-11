@@ -1,0 +1,5 @@
+streamlit>=1.30
+pandas>=1.5
+altair>=5.0
+plotly>=5.18
+openpyxl>=3.1
