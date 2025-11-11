@@ -88,16 +88,19 @@ def clean_holdings(df):
 
 st.sidebar.header("Data")
 
-admin_mode = st.sidebar.checkbox("Admin mode", value=False)
-if admin_mode:
+# Check Streamlit secret flag for owner mode
+is_owner = st.secrets.get("OWNER", "").lower() == "yes"
+
+if is_owner:
     uploaded = st.sidebar.file_uploader("Upload Excel (AI_Ecosystem_ETFs file)", type=["xlsx"])
+    st.sidebar.success("Owner mode enabled — you can upload a new dataset.")
 else:
     st.sidebar.info("Static dashboard (viewer mode)")
 
-# Always prefer uploaded when in admin mode; otherwise load bundled dataset
+# Always prefer uploaded when in owner mode; otherwise load bundled dataset
 demo_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
 
-if admin_mode and uploaded is not None:
+if is_owner and uploaded is not None:
     dfs = load_excel(uploaded)
 else:
     if os.path.exists(demo_path):
@@ -105,7 +108,7 @@ else:
     else:
         st.error(
             "Dataset not found. Please include AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx "
-            "in the repo, or enable Admin mode and upload a file."
+            "in the repo, or set OWNER=yes in secrets and upload a file."
         )
         st.stop()
 
