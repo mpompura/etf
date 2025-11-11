@@ -62,8 +62,14 @@ def clean_summary(df):
     theme_col = get_col("Theme")
 
     # Coerce numeric (AUM stays as number, percent-like fields are stored as FRACTIONS 0–1)
-    if aum_col in df: 
-        df[aum_col] = df[aum_col].astype(str).str.replace(r'[^0-9\.\-]', '', regex=True).replace('', pd.NA).astype(float)
+    if aum_col in df:
+        df[aum_col] = pd.to_numeric(
+            df[aum_col]
+              .astype(str)
+              .str.replace(r'[^0-9\.\-]', '', regex=True)  # remove $, B, commas, spaces
+              .str.strip(),
+            errors="coerce"  # invalid entries become NaN safely
+        )
 
     for col in [ytd_col, r1_col, r3_col, r5_col, dd_col, exp_col, div_col, top10_col, adv_col]:
         if col in df:
@@ -72,7 +78,7 @@ def clean_summary(df):
     # --- KEY FIX: normalize Top-10 Weight to a fraction (0–1) if it's 100× too small ---
     if top10_col in df and df[top10_col].notna().any():
         # If values look like 0.0059 (0.59%) instead of 0.59 (59%), scale ×100
-        if df[top10_col].max() < 0.02:   # all values < 2%
+        if df[top10_col].max() < 0.02:
             df[top10_col] = df[top10_col] * 100.0
 
     return df, dict(aum=aum_col, ytd=ytd_col, r1=r1_col, r3=r3_col, r5=r5_col, dd=dd_col,
