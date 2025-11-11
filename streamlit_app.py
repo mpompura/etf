@@ -259,9 +259,26 @@ left, right = st.columns(2)
 with left:
     if {"ETF", "Industry", "Weight_Percent"}.issubset(holdings_f.columns):
         st.markdown("**Industry Composition (Treemap)**")
-        treemap = px.treemap(holdings_f, path=["ETF", "Industry"], values="Weight_Percent",
-                              hover_data=["Ticker", "Holding"] if {"Ticker","Holding"}.issubset(holdings_f.columns) else None)
-        treemap.update_traces(hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>')
+
+        treemap = px.treemap(
+            holdings_f,
+            path=["ETF", "Industry"],
+            values="Weight_Percent",
+            hover_data=["Ticker", "Holding"] if {"Ticker", "Holding"}.issubset(holdings_f.columns) else None,
+        )
+
+        # ✨ Bigger, clearer text + consistent hover info
+        treemap.update_traces(
+            textinfo="label+percent entry",
+            textfont=dict(size=18, color="black"),  # 🔹 increase font size here
+            hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>'
+        )
+
+        treemap.update_layout(
+            uniformtext=dict(minsize=12, mode="show"),
+            margin=dict(t=30, l=0, r=0, b=0),
+        )
+
         st.plotly_chart(treemap, use_container_width=True)
 
 # Stacked bar by Country
