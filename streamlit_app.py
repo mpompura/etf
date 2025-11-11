@@ -255,51 +255,36 @@ else:
 
 left, right = st.columns(2)
 
-# Treemap by Industry (Plotly) — compact preview, readable on drilldown
+# Treemap by Industry (Plotly) — ETF names visible, no clutter, full detail on tap
 with left:
     if {"ETF", "Industry", "Weight_Percent"}.issubset(holdings_f.columns):
         st.markdown("**Industry Composition (Treemap)**")
 
-        compact = st.checkbox("Compact preview (mobile-friendly)", value=True, key="treemap_compact")
-
         treemap = px.treemap(
             holdings_f,
-            path=["ETF", "Industry"],
+            path=["ETF", "Industry"],  # ETF names always shown at top level
             values="Weight_Percent",
             hover_data=["Ticker", "Holding"] if {"Ticker", "Holding"}.issubset(holdings_f.columns) else None,
         )
 
-        if compact:
-            # Minimal text at the top level; on drilldown (tap), labels appear
-            treemap.update_traces(
-                textinfo="label+percent parent",     # show only concise info
-                textfont=dict(size=10, color="black"),
-                hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>',
-                tiling=dict(pad=3),
-                marker=dict(line=dict(width=0.5, color="white")),
-            )
-            treemap.update_layout(
-                # Hide labels when there isn't enough space; they appear after drilldown
-                uniformtext=dict(minsize=12, mode="hide"),
-                margin=dict(t=30, l=0, r=0, b=0),
-                height=520,
-            )
-        else:
-            # Desktop / full labels
-            treemap.update_traces(
-                textinfo="label+percent entry",
-                textfont=dict(size=16, color="black"),
-                hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>',
-                tiling=dict(pad=3),
-                marker=dict(line=dict(width=0.5, color="white")),
-            )
-            treemap.update_layout(
-                uniformtext=dict(minsize=10, mode="show"),
-                margin=dict(t=30, l=0, r=0, b=0),
-                height=560,
-            )
+        # Show ETF labels + relative percentages, hide tiny text inside sub-boxes
+        treemap.update_traces(
+            textinfo="label+percent parent",
+            textfont=dict(size=12, color="black"),
+            hovertemplate="<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>",
+            tiling=dict(pad=3),
+            marker=dict(line=dict(width=0.5, color="white")),
+            maxdepth=2  # ETF + one level of industries, keeps labels readable
+        )
+
+        treemap.update_layout(
+            uniformtext=dict(minsize=10, mode="hide"),  # hides labels that don’t fit
+            margin=dict(t=30, l=0, r=0, b=0),
+            height=520
+        )
 
         st.plotly_chart(treemap, use_container_width=True)
+
 
         
 # Stacked bar by Country
