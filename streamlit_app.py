@@ -41,7 +41,6 @@ def clean_summary(df):
     def get_col(*cands):
         for c in cands:
             if c in df.columns: return c
-            # try case-insensitive match
             lc = c.lower()
             for k in cols:
                 if k == lc:
@@ -62,11 +61,20 @@ def clean_summary(df):
     etf_col = get_col("ETF")
     theme_col = get_col("Theme")
 
-    # Coerce numeric
-    if aum_col in df: df[aum_col] = df[aum_col].astype(str).str.replace(r'[^0-9\.\-]', '', regex=True).replace('', np.nan).astype(float)
+    # Coerce numeric (AUM stays as number, percent-like fields are stored as FRACTIONS 0–1)
+    if aum_col in df: 
+        df[aum_col] = df[aum_col].astype(str).str.replace(r'[^0-9\.\-]', '', regex=True).replace('', pd.NA).astype(float)
+
     for col in [ytd_col, r1_col, r3_col, r5_col, dd_col, exp_col, div_col, top10_col, adv_col]:
         if col in df:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # --- KEY FIX: normalize Top-10 Weight to a fraction (0–1) if it's 100× too small ---
+    if top10_col in df and df[top10_col].notna().any():
+        # If values look like 0.0059 (0.59%) instead of 0.59 (59%), scale ×100
+        if df[top10_col].max() < 0.02:   # all values < 2%
+            df[top10_col] = df[top10_col] * 100.0
+
     return df, dict(aum=aum_col, ytd=ytd_col, r1=r1_col, r3=r3_col, r5=r5_col, dd=dd_col,
                     exp=exp_col, div=div_col, top10=top10_col, adv=adv_col, etf=etf_col, theme=theme_col)
 
@@ -143,7 +151,7 @@ if sm['aum'] and sm['etf']:
 if sm['exp']:
     col2.metric("Median Expense Ratio", f"{summary[sm['exp']].median():.3%}")
 if sm['r1']:
-    col3.metric("Median 1Y Return", f"{summary[sm['r1']].median():.2f}")
+    col3.metric("Median 1Y Return", f"{summary[sm['r1']].median():.2%}")
 if sm['dd']:
     col4.metric("Median Max Drawdown (3Y)", f"{summary[sm['dd']].median():.2%}")
 
