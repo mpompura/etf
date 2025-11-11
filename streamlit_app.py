@@ -85,23 +85,27 @@ def clean_holdings(df):
     return df
 
 # Sidebar — file input
-st.sidebar.header("Data")
-uploaded = st.sidebar.file_uploader("Upload Excel (your AI_Ecosystem_ETFs file)", type=["xlsx"])
 
-default_note = False
-if uploaded is not None:
+st.sidebar.header("Data")
+admin_mode = st.sidebar.checkbox("Admin mode", value=False)
+if admin_mode:
+    uploaded = st.sidebar.file_uploader("Upload Excel (AI_Ecosystem_ETFs file)", type=["xlsx"])
+else:
+    st.sidebar.info("Static dashboard (viewer mode)")
+
+# Always prefer uploaded when in admin mode; otherwise load bundled dataset
+demo_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
+if admin_mode and uploaded is not None:
     dfs = load_excel(uploaded)
 else:
-    # Optional: try to open a bundled demo if present
-    demo_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
     if os.path.exists(demo_path):
         dfs = load_excel(demo_path)
-        default_note = True
     else:
-        st.info("Upload the Excel file to begin.")
+        st.error("Dataset not found. Please include AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx in the repo, or enable Admin mode and upload a file.")
         st.stop()
-
+        
 sheet_names = list(dfs.keys())
+ list(dfs.keys())
 summary = dfs.get("Summary")
 holdings = dfs.get("Holdings")
 glossary = dfs.get("Glossary")
@@ -112,9 +116,6 @@ if summary is None or holdings is None:
 
 summary, sm = clean_summary(summary)
 holdings = clean_holdings(holdings)
-
-if default_note:
-    st.caption("Using demo data bundled with the app. Upload your latest file to refresh.")
 
 # --- Top KPIs ---
 col1, col2, col3, col4 = st.columns(4)
