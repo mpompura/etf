@@ -8,6 +8,26 @@ import plotly.express as px
 
 st.set_page_config(page_title="AI Ecosystem ETFs — Interactive Explorer", layout="wide")
 
+PERCENT_CANDIDATES = [
+    "YTD %","1Y %","3Y % (Total Return)","5Y % (Total Return)",
+    "YTD_Percent","1Y_Percent","3Y_Total_Return_Percent","5Y_Total_Return_Percent",
+    "Max Drawdown (3Y)","Max_Drawdown_3Y",
+    "Expense Ratio","Expense_Ratio",
+    "Dividend Yield %","Dividend_Yield_Percent",
+    "Top-10 Weight %","Top_10_Weight_Percent",
+    "Weight %","Weight_Percent"
+]
+
+def is_percent_col(col_name):
+    return any(col_name == c for c in PERCENT_CANDIDATES)
+
+def format_percent(v, decimals=1):
+    try:
+        return f"{float(v):.{decimals}%}"
+    except Exception:
+        return v
+
+
 @st.cache_data
 def load_excel(file):
     xls = pd.ExcelFile(file)
@@ -132,10 +152,10 @@ with cols[0]:
     if sm['r5'] and sm['dd'] and sm['etf'] and not summary_f.empty:
         st.subheader("Risk vs Return")
         scatter = alt.Chart(summary_f).mark_point(size=120).encode(
-            x=alt.X(f"{sm['dd']}:Q", title="Max Drawdown (3Y)"),
-            y=alt.Y(f"{sm['r5']}:Q", title="5Y % Total Return"),
+            x=alt.X(f"{sm['dd']}:Q", title="Max Drawdown (3Y)", axis=alt.Axis(format='.1%')),
+            y=alt.Y(f"{sm['r5']}:Q", title="5Y % Total Return", axis=alt.Axis(format='.1%')),
             color=alt.Color(f"{sm['theme']}:N", title="Theme") if sm['theme'] else alt.value("steelblue"),
-            tooltip=[sm['etf'], sm['theme'], sm['dd'], sm['r5']]
+            tooltip=[sm['etf'], sm['theme'], alt.Tooltip(f"{sm['dd']}:Q", format='.1%'), alt.Tooltip(f"{sm['r5']}:Q", format='.1%')]
         )
         text = alt.Chart(summary_f).mark_text(dy=-10).encode(
             x=f"{sm['dd']}:Q",
@@ -149,10 +169,10 @@ with cols[1]:
     if sm['r3'] and sm['r5'] and sm['etf'] and not summary_f.empty:
         st.subheader("3Y vs 5Y Total Return")
         comp = alt.Chart(summary_f).mark_circle(size=120).encode(
-            x=alt.X(f"{sm['r3']}:Q", title="3Y % Total Return"),
-            y=alt.Y(f"{sm['r5']}:Q", title="5Y % Total Return"),
+            x=alt.X(f"{sm['r3']}:Q", title="3Y % Total Return", axis=alt.Axis(format='.1%')),
+            y=alt.Y(f"{sm['r5']}:Q", title="5Y % Total Return", axis=alt.Axis(format='.1%')),
             color=alt.Color(f"{sm['theme']}:N", title="Theme") if sm['theme'] else alt.value("teal"),
-            tooltip=[sm['etf'], sm['r3'], sm['r5']]
+            tooltip=[sm['etf'], alt.Tooltip(f"{sm['r3']}:Q", format='.1%'), alt.Tooltip(f"{sm['r5']}:Q", format='.1%')]
         )
         text2 = alt.Chart(summary_f).mark_text(dy=-10).encode(
             x=f"{sm['r3']}:Q",
@@ -178,6 +198,7 @@ with left:
         st.markdown("**Industry Composition (Treemap)**")
         treemap = px.treemap(holdings_f, path=["ETF", "Industry"], values="Weight_Percent",
                               hover_data=["Ticker", "Holding"] if {"Ticker","Holding"}.issubset(holdings_f.columns) else None)
+        treemap.update_traces(hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>')
         st.plotly_chart(treemap, use_container_width=True)
 
 # Stacked bar by Country
@@ -188,17 +209,26 @@ with right:
         country_pivot = country_pivot.reset_index().melt(id_vars="Country", var_name="ETF", value_name="Weight_Percent")
         bar = alt.Chart(country_pivot).mark_bar().encode(
             x=alt.X("Country:N", sort='-y'),
-            y=alt.Y("Weight_Percent:Q", stack="normalize", title="Share of Weight"),
+            y=alt.Y("Weight_Percent:Q", stack="normalize", title="Share of Weight", axis=alt.Axis(format='.0%')),
             color="ETF:N",
             tooltip=["Country", "ETF", alt.Tooltip("Weight_Percent:Q", format=".2f")]
         ).properties(height=320)
         st.altair_chart(bar, use_container_width=True)
 
+
 # Holdings table (filter + search)
 st.markdown("### Holdings Table")
 if not holdings_f.empty:
+    display_df = holdings_f.copy()
+    # Format percent-looking columns as percentages for display only (do not touch underlying for charts)
+    for col in display_df.columns:
+        if is_percent_col(col):
+            try:
+                display_df[col] = display_df[col].map(lambda x: format_percent(x, 2) if pd.notna(x) else x)
+            except Exception:
+                pass
     search = st.text_input("Search holdings (by Ticker or Name)", "")
-    hf = holdings_f.copy()
+    hf = display_df.copy()
     if search:
         mask = pd.Series([True]*len(hf))
         for col in ["Ticker", "Holding", "Industry", "Country"]:
