@@ -255,10 +255,12 @@ else:
 
 left, right = st.columns(2)
 
-# Treemap by Industry (Plotly) — improved mobile behavior
+# Treemap by Industry (Plotly) — compact preview, readable on drilldown
 with left:
     if {"ETF", "Industry", "Weight_Percent"}.issubset(holdings_f.columns):
         st.markdown("**Industry Composition (Treemap)**")
+
+        compact = st.checkbox("Compact preview (mobile-friendly)", value=True, key="treemap_compact")
 
         treemap = px.treemap(
             holdings_f,
@@ -267,21 +269,35 @@ with left:
             hover_data=["Ticker", "Holding"] if {"Ticker", "Holding"}.issubset(holdings_f.columns) else None,
         )
 
-        # 🔹 Always render full tree (no hiding levels)
-        # 🔹 Slightly bigger text + no cutoff
-        treemap.update_traces(
-            textinfo="label+percent entry",
-            textfont=dict(size=18, color="black"),
-            hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>',
-            tiling=dict(pad=3),         # extra space between boxes for readability
-            marker=dict(line=dict(width=0.5, color="white")),  # subtle borders
-        )
-
-        treemap.update_layout(
-            uniformtext=dict(minsize=10, mode="show"),  # ensures labels always visible
-            margin=dict(t=30, l=0, r=0, b=0),
-            height=500,  # makes mobile rendering more stable
-        )
+        if compact:
+            # Minimal text at the top level; on drilldown (tap), labels appear
+            treemap.update_traces(
+                textinfo="label+percent parent",     # show only concise info
+                textfont=dict(size=10, color="black"),
+                hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>',
+                tiling=dict(pad=3),
+                marker=dict(line=dict(width=0.5, color="white")),
+            )
+            treemap.update_layout(
+                # Hide labels when there isn't enough space; they appear after drilldown
+                uniformtext=dict(minsize=12, mode="hide"),
+                margin=dict(t=30, l=0, r=0, b=0),
+                height=520,
+            )
+        else:
+            # Desktop / full labels
+            treemap.update_traces(
+                textinfo="label+percent entry",
+                textfont=dict(size=16, color="black"),
+                hovertemplate='<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>',
+                tiling=dict(pad=3),
+                marker=dict(line=dict(width=0.5, color="white")),
+            )
+            treemap.update_layout(
+                uniformtext=dict(minsize=10, mode="show"),
+                margin=dict(t=30, l=0, r=0, b=0),
+                height=560,
+            )
 
         st.plotly_chart(treemap, use_container_width=True)
 
