@@ -110,7 +110,7 @@ else:
         st.stop()
 
 sheet_names = list(dfs.keys())
- list(dfs.keys())
+list(dfs.keys())
 summary = dfs.get("Summary")
 holdings = dfs.get("Holdings")
 glossary = dfs.get("Glossary")
