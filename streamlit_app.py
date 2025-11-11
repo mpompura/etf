@@ -197,22 +197,22 @@ with cols[0]:
         )
         st.altair_chart((scatter + text).interactive(), use_container_width=True)
 
-# --- 3Y vs 5Y comparison ---
+# --- Expense Ratio vs 5Y Return ---
 with cols[1]:
-    if sm['r3'] and sm['r5'] and sm['etf'] and not summary_f.empty:
-        st.subheader("3Y vs 5Y Total Return")
-        comp = alt.Chart(summary_f).mark_circle(size=120).encode(
-            x=alt.X(f"{sm['r3']}:Q", title="3Y % Total Return", axis=alt.Axis(format='.1%')),
+    if sm['exp'] and sm['r5'] and sm['etf'] and not summary_f.empty:
+        st.subheader("Expense Ratio vs 5Y Return")
+        exp_chart = alt.Chart(summary_f).mark_circle(size=120).encode(
+            x=alt.X(f"{sm['exp']}:Q", title="Expense Ratio", axis=alt.Axis(format='.1%')),
             y=alt.Y(f"{sm['r5']}:Q", title="5Y % Total Return", axis=alt.Axis(format='.1%')),
-            color=alt.Color(f"{sm['theme']}:N", title="Theme") if sm['theme'] else alt.value("teal"),
-            tooltip=[sm['etf'], alt.Tooltip(f"{sm['r3']}:Q", format='.1%'), alt.Tooltip(f"{sm['r5']}:Q", format='.1%')]
+            color=alt.Color(f"{sm['theme']}:N", title="Theme") if sm['theme'] else alt.value("orange"),
+            tooltip=[sm['etf'], alt.Tooltip(f"{sm['exp']}:Q", format='.1%'), alt.Tooltip(f"{sm['r5']}:Q", format='.1%')]
         )
-        text2 = alt.Chart(summary_f).mark_text(dy=-10).encode(
-            x=f"{sm['r3']}:Q",
+        labels = alt.Chart(summary_f).mark_text(dy=-10).encode(
+            x=f"{sm['exp']}:Q",
             y=f"{sm['r5']}:Q",
             text=f"{sm['etf']}:N"
         )
-        st.altair_chart((comp + text2).interactive(), use_container_width=True)
+        st.altair_chart((exp_chart + labels).interactive(), use_container_width=True)
 
 
 st.markdown("---")
