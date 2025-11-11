@@ -255,35 +255,71 @@ else:
 
 left, right = st.columns(2)
 
-# Treemap by Industry (Plotly) — ETF names visible, no clutter, full detail on tap
+# Treemap by Industry (Plotly) — smart compact mode on drill/one-ETF view
 with left:
     if {"ETF", "Industry", "Weight_Percent"}.issubset(holdings_f.columns):
         st.markdown("**Industry Composition (Treemap)**")
 
+        # If user filtered to exactly one ETF, switch to compact text automatically
+        one_etf_view = len(selected_etfs) == 1
+
+        # Shorten long industry labels for readability (hover shows full)
+        hf = holdings_f.copy()
+        def _short(s, n=16):
+            s = str(s) if pd.notna(s) else ""
+            return s if len(s) <= n else s[: n - 1] + "…"
+        hf["Industry_Short"] = hf["Industry"].astype(str).map(lambda x: _short(x, 16))
+
         treemap = px.treemap(
-            holdings_f,
-            path=["ETF", "Industry"],  # ETF names always shown at top level
+            hf,
+            path=["ETF", "Industry_Short"],           # short label drawn in boxes
             values="Weight_Percent",
-            hover_data=["Ticker", "Holding"] if {"Ticker", "Holding"}.issubset(holdings_f.columns) else None,
+            hover_data=["Industry", "Ticker", "Holding"] if {"Ticker","Holding"}.issubset(hf.columns) else ["Industry"],
         )
 
-        # Show ETF labels + relative percentages, hide tiny text inside sub-boxes
-        treemap.update_traces(
-            textinfo="label+percent parent",
-            textfont=dict(size=12, color="black"),
-            hovertemplate="<b>%{label}</b><br>Weight: %{value:.2%}<extra></extra>",
-            tiling=dict(pad=3),
-            marker=dict(line=dict(width=0.5, color="white")),
-            maxdepth=2  # ETF + one level of industries, keeps labels readable
-        )
-
-        treemap.update_layout(
-            uniformtext=dict(minsize=10, mode="hide"),  # hides labels that don’t fit
-            margin=dict(t=30, l=0, r=0, b=0),
-            height=520
-        )
+        if one_etf_view:
+            # Compact text so you see *all* boxes without a wall of labels
+            treemap.update_traces(
+                textinfo="percent entry",             # tiny % only inside boxes
+                textfont=dict(size=10, color="black"),
+                hovertemplate="<b>%{customdata[0]}</b><br>Weight: %{value:.2%}<extra></extra>",
+                tiling=dict(pad=3),
+                marker=dict(line=dict(width=0.5, color="white")),
+            )
+            treemap.update_layout(
+                uniformtext=dict(minsize=12, mode="hide"),
+                margin=dict(t=30, l=0, r=0, b=0),
+                height=540,
+            )
+        else:
+            # Multi-ETF overview: show ETF & compact industry labels
+            treemap.update_traces(
+                textinfo="label+percent parent",
+                textfont=dict(size=12, color="black"),
+                hovertemplate="<b>%{customdata[0]}</b><br>Weight: %{value:.2%}<extra></extra>",
+                tiling=dict(pad=3),
+                marker=dict(line=dict(width=0.5, color="white")),
+                maxdepth=2,                           # ETF + one industry level
+            )
+            treemap.update_layout(
+                uniformtext=dict(minsize=10, mode="hide"),
+                margin=dict(t=30, l=0, r=0, b=0),
+                height=540,
+            )
 
         st.plotly_chart(treemap, use_container_width=True)
+
+        # Optional: in one-ETF view, show a tidy ranked table on the right
+        if one_etf_view:
+            st.markdown("**Industries (sorted by weight)**")
+            tbl = (
+                hf[hf["ETF"].isin(selected_etfs)]
+                .groupby("Industry", as_index=False)["Weight_Percent"]
+                .sum()
+                .sort_values("Weight_Percent", ascending=False)
+            )
+            tbl["Weight"] = (tbl["Weight_Percent"] * 100).round(2).astype(str) + "%"
+            st.dataframe(tbl[["Industry", "Weight"]], use_container_width=True, hide_index=True)
 
 
         
