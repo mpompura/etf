@@ -181,6 +181,36 @@ with cols[1]:
         )
         st.altair_chart((comp + text2).interactive(), use_container_width=True)
 
+
+st.markdown("---")
+st.subheader("Summary Table")
+
+if not summary_f.empty:
+    # display-friendly copy: format percent columns only (not AUM)
+    summary_display = summary_f.copy()
+    for col in summary_display.columns:
+        if is_percent_col(col):
+            try:
+                summary_display[col] = summary_display[col].map(lambda x: format_percent(x, 2) if pd.notna(x) else x)
+            except Exception:
+                pass
+
+    # Optional quick search across ETF/Theme
+    search_summary = st.text_input("Search summary (ETF or Theme)", "")
+    sf = summary_display.copy()
+    etf_col = sm.get('etf')
+    theme_col = sm.get('theme')
+    if search_summary and (etf_col or theme_col):
+        mask = pd.Series([True]*len(sf))
+        if etf_col in sf.columns:
+            mask &= sf[etf_col].astype(str).str.contains(search_summary, case=False, na=False)
+        if theme_col in sf.columns:
+            mask |= sf[theme_col].astype(str).str.contains(search_summary, case=False, na=False)
+        sf = sf[mask]
+    st.dataframe(sf, use_container_width=True, hide_index=True)
+else:
+    st.info("No data in Summary after filters.")
+
 st.markdown("---")
 st.subheader("Holdings Analyzer")
 
