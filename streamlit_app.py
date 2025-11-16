@@ -174,6 +174,19 @@ def _find_column(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
     return None
 
 
+def _score_sheet_columns(df: pd.DataFrame) -> int:
+    """Return how many canonical columns we can locate in a worksheet."""
+
+    lowered = {str(c).lower().strip() for c in df.columns}
+    score = 0
+    for candidates in CANONICAL_COLUMNS.values():
+        for cand in candidates:
+            if cand.lower().strip() in lowered:
+                score += 1
+                break
+    return score
+
+
 def clean_etf_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, ColumnMap]:
     """Standardize the ETF sheet so downstream logic works with any workbook."""
 
@@ -459,10 +472,6 @@ def sanitize_for_display(df: pd.DataFrame) -> pd.DataFrame:
 # Sidebar (data source + filters)
 # ---------------------------------------------------------------------------
 
-sheet_name = st.sidebar.selectbox("Sheet for ETF analytics", list(workbook.keys()))
-raw_df = workbook[sheet_name]
-etf_df, columns_map = clean_etf_sheet(raw_df)
-
 st.sidebar.header("Data source")
 uploaded_file = st.sidebar.file_uploader("Upload Excel workbook", type=["xlsx"])
 default_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
@@ -480,9 +489,29 @@ if workbook is None:
     )
     st.stop()
 
-sheet_name = st.sidebar.selectbox("Sheet for ETF analytics", list(workbook.keys()))
+sheet_names = list(workbook.keys())
+if not sheet_names:
+    st.error("The uploaded workbook does not contain any worksheets.")
+    st.stop()
+
+sheet_scores = {name: _score_sheet_columns(workbook[name]) for name in sheet_names}
+best_sheet = max(sheet_scores, key=sheet_scores.get)
+default_index = sheet_names.index(best_sheet)
+sheet_name = st.sidebar.selectbox(
+    "Sheet for ETF analytics", sheet_names, index=default_index
+)
+st.sidebar.caption(
+    f"Recognized {sheet_scores[sheet_name]} of {len(CANONICAL_COLUMNS)} key columns"
+)
 raw_df = workbook[sheet_name]
 etf_df, columns_map = clean_etf_sheet(raw_df)
+
+if sheet_scores.get(sheet_name, 0) < 8:
+    st.warning(
+        "The selected worksheet only contains a few of the expected ETF columns. "
+        "Try switching to a sheet such as 'ETFs' or double-check that your upload "
+        "includes the detailed holdings view."
+    )
 
 if etf_df.empty:
     st.error("The selected sheet does not contain data.")
