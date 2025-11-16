@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import io
 import os
+import re
+import zipfile
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Union
 
@@ -215,6 +217,32 @@ def _ensure_bytes_buffer(source: Union[str, os.PathLike, io.BytesIO, bytes]) -> 
     raise TypeError("Unsupported data source for Excel loading")
 
 
+def _strip_conditional_formatting(raw_bytes: bytes) -> bytes:
+    """Remove conditional-formatting XML nodes that break openpyxl.
+
+    Some vendor spreadsheets inject proprietary operators (e.g. "LessOrEqual")
+    that openpyxl refuses to parse.  We do not need conditional formatting for
+    analytics, so strip those nodes before re-loading the sanitized workbook.
+    """
+
+    src = io.BytesIO(raw_bytes)
+    dst = io.BytesIO()
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.startswith("xl/worksheets/") and item.filename.endswith(".xml"):
+                text = data.decode("utf-8", errors="ignore")
+                cleaned = re.sub(
+                    r"<conditionalFormatting[\s\S]*?</conditionalFormatting>",
+                    "",
+                    text,
+                    flags=re.MULTILINE,
+                )
+                data = cleaned.encode("utf-8")
+            zout.writestr(item, data)
+    return dst.getvalue()
+
+
 def _load_with_openpyxl(source: Union[str, os.PathLike, io.BytesIO]) -> Dict[str, pd.DataFrame]:
     workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False)
     frames: Dict[str, pd.DataFrame] = {}
@@ -243,10 +271,12 @@ def load_excel(path: Union[str, os.PathLike, io.BytesIO, bytes]) -> Dict[str, pd
             raise
         fallback_source: Union[str, os.PathLike, io.BytesIO]
         if isinstance(prepared, (str, os.PathLike)):
-            fallback_source = prepared
+            with open(prepared, "rb") as fh:
+                buffer_bytes = fh.read()
         else:
             buffer_bytes = raw_bytes if raw_bytes is not None else prepared.getvalue()
-            fallback_source = io.BytesIO(buffer_bytes)
+        sanitized = _strip_conditional_formatting(buffer_bytes)
+        fallback_source = io.BytesIO(sanitized)
         return _load_with_openpyxl(fallback_source)
 
 
