@@ -1,380 +1,1029 @@
+"""Streamlit dashboard for ETF analytics and risk reporting.
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import altair as alt
+The original dashboard in this repository focused on two sheets (Summary and
+Holdings).  The new workbook that the user provided contains a rich `ETFs`
+sheet with risk, performance, income, and quality metrics.  This script builds
+an interactive experience around that sheet so it can run inside a local
+Streamlit container (Docker or bare-metal).
+"""
+
+from __future__ import annotations
+
+import io
 import os
+import re
+import zipfile
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Dict, Iterable, List, Optional, Union
+
+import pandas as pd
 import plotly.express as px
+import streamlit as st
+from openpyxl import load_workbook
 
-st.set_page_config(page_title="AI Ecosystem ETFs — Interactive Explorer", layout="wide")
 
-PERCENT_CANDIDATES = [
-    "YTD %","1Y %","3Y % (Total Return)","5Y % (Total Return)",
-    "YTD_Percent","1Y_Percent","3Y_Total_Return_Percent","5Y_Total_Return_Percent",
-    "Max Drawdown (3Y)","Max_Drawdown_3Y",
-    "Expense Ratio","Expense_Ratio",
-    "Dividend Yield %","Dividend_Yield_Percent",
-    "Top-10 Weight %","Top_10_Weight_Percent",
-    "Weight %","Weight_Percent"
-]
+st.set_page_config(
+    page_title="ETF Lab — Risk & Performance Explorer",
+    layout="wide",
+    page_icon="📊",
+)
 
-def is_percent_col(col_name):
-    return any(col_name == c for c in PERCENT_CANDIDATES)
 
-def format_percent(v, decimals=1):
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+CANONICAL_COLUMNS: Dict[str, Iterable[str]] = {
+    "rank": ["rank"],
+    "symbol": ["symbol", "ticker", "etf"],
+    "fund_name": ["fund name", "fund", "theme"],
+    "price": ["price"],
+    "change_pct": ["change %", "change pct", "change"],
+    "asset_class": [
+        "asset class & sub-class",
+        "asset class",
+        "asset class & sub class",
+        "category",
+    ],
+    "fund_type": ["fund type"],
+    "issuer": ["issuer", "provider"],
+    "inception_date": ["inception date", "inception"],
+    "aum": ["aum", "aum ($b)", "aum ($mm)", "aum ($m)", "aum (usd)", "aum_billions"],
+    "expense_ratio": ["expense ratio", "expense", "expense_ratio"],
+    "quant_rating": ["quant rating"],
+    "sa_rating": ["sa analyst ratings", "analyst rating"],
+    "perf_1y": ["1y perf", "1y %", "1y perf %", "1 year perf", "1y_percent"],
+    "perf_3y": ["3y perf", "3 year perf"],
+    "return_3y": ["3y total return", "3y_total_return_percent"],
+    "perf_5y": ["5y perf", "5 year perf"],
+    "return_5y": ["5y total return", "5y_total_return_percent"],
+    "perf_10y": ["10y perf", "10 year perf"],
+    "return_10y": ["10y total return"],
+    "ytd_perf": ["ytd perf", "ytd %", "ytd_percent"],
+    "top10_weight": [
+        "% top 10",
+        "% top 10 holdings",
+        "top 10 holdings",
+        "top 10 weight",
+        "top_10_weight_percent",
+    ],
+    "holdings_count": [
+        "holdings",
+        "# holdings",
+        "#holdings",
+        "number of holdings",
+    ],
+    "div_growth_5y": ["div growth 5y"],
+    "div_growth_3y": ["div growth 3y"],
+    "yield_fwd": ["yield fwd"],
+    "yield_ttm": ["yield ttm", "dividend_yield_percent"],
+    "frequency": ["frequency", "distribution frequency", "rebalance"],
+    "beta_60m": ["60m beta", "beta"],
+    "days_quant": ["days at quant rating"],
+}
+
+DISPLAY_MISSING_VALUES = {"-", "—", "na", "n/a", "N/A", "NA", ""}
+
+PERCENT_COLUMNS = {
+    "change_pct",
+    "perf_1y",
+    "perf_3y",
+    "return_3y",
+    "perf_5y",
+    "return_5y",
+    "perf_10y",
+    "return_10y",
+    "ytd_perf",
+    "top10_weight",
+    "div_growth_5y",
+    "div_growth_3y",
+    "yield_fwd",
+    "yield_ttm",
+}
+
+FORCE_PERCENT_COLUMNS = {
+    "expense_ratio",
+    "div_growth_5y",
+    "div_growth_3y",
+    "yield_fwd",
+    "yield_ttm",
+}
+
+
+@dataclass
+class ColumnMap:
+    """Container for column names after cleaning."""
+
+    rank: Optional[str] = None
+    symbol: Optional[str] = None
+    fund_name: Optional[str] = None
+    price: Optional[str] = None
+    change_pct: Optional[str] = None
+    asset_class: Optional[str] = None
+    fund_type: Optional[str] = None
+    issuer: Optional[str] = None
+    inception_date: Optional[str] = None
+    aum: Optional[str] = None
+    expense_ratio: Optional[str] = None
+    quant_rating: Optional[str] = None
+    sa_rating: Optional[str] = None
+    perf_1y: Optional[str] = None
+    perf_3y: Optional[str] = None
+    return_3y: Optional[str] = None
+    perf_5y: Optional[str] = None
+    return_5y: Optional[str] = None
+    perf_10y: Optional[str] = None
+    return_10y: Optional[str] = None
+    ytd_perf: Optional[str] = None
+    top10_weight: Optional[str] = None
+    holdings_count: Optional[str] = None
+    div_growth_5y: Optional[str] = None
+    div_growth_3y: Optional[str] = None
+    yield_fwd: Optional[str] = None
+    yield_ttm: Optional[str] = None
+    frequency: Optional[str] = None
+    beta_60m: Optional[str] = None
+    days_quant: Optional[str] = None
+
+
+def _normalize_numeric(
+    series: pd.Series, to_percent: bool = False, force_percent: bool = False
+) -> pd.Series:
+    cleaned = (
+        series.astype(str)
+        .str.replace(r"[,$%]", "", regex=True)
+        .str.replace(r"[A-Za-z]", "", regex=True)
+        .str.strip()
+    )
+    numeric = pd.to_numeric(cleaned, errors="coerce")
+    if to_percent:
+        max_val = numeric.abs().max(skipna=True)
+        if force_percent or (not pd.isna(max_val) and max_val > 2):
+            numeric = numeric / 100.0
+    return numeric
+
+
+def _find_column(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
+    lowered = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        cand_lower = cand.lower().strip()
+        if cand_lower in lowered:
+            return lowered[cand_lower]
+    return None
+
+
+def clean_etf_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, ColumnMap]:
+    """Standardize the ETF sheet so downstream logic works with any workbook."""
+
+    df = df.copy()
+    colmap = ColumnMap()
+    rename_dict: Dict[str, str] = {}
+    source_columns: Dict[str, str] = {}
+
+    for canonical, candidates in CANONICAL_COLUMNS.items():
+        match = _find_column(df, candidates)
+        if match:
+            rename_dict[match] = canonical
+            setattr(colmap, canonical, canonical)
+            source_columns[canonical] = match
+
+    df = df.rename(columns=rename_dict)
+
+    for col_name in PERCENT_COLUMNS:
+        if col_name in df.columns:
+            force = col_name in FORCE_PERCENT_COLUMNS
+            df[col_name] = _normalize_numeric(
+                df[col_name], to_percent=True, force_percent=force
+            )
+
+    numeric_cols = [
+        "price",
+        "aum",
+        "expense_ratio",
+        "quant_rating",
+        "sa_rating",
+        "beta_60m",
+        "days_quant",
+    ]
+    for col_name in numeric_cols:
+        if col_name in df.columns:
+            df[col_name] = _normalize_numeric(df[col_name], to_percent=False)
+
+    if "aum" in df.columns:
+        source_name = source_columns.get("aum", "")
+        if source_name and "billion" in source_name.lower():
+            df["aum"] = df["aum"] * 1_000_000_000
+        df["aum_billions"] = df["aum"] / 1_000_000_000
+
+    if "inception_date" in df.columns:
+        df["inception_date"] = pd.to_datetime(df["inception_date"], errors="coerce")
+
+    return df, colmap
+
+
+def _ensure_bytes_buffer(source: Union[str, os.PathLike, io.BytesIO, bytes]) -> tuple[Union[str, os.PathLike, io.BytesIO], Optional[bytes]]:
+    """Return an object pandas can read plus raw bytes for fallback."""
+
+    if isinstance(source, (str, os.PathLike)):
+        return source, None
+
+    if isinstance(source, bytes):
+        buffer = io.BytesIO(source)
+        return buffer, source
+
+    if isinstance(source, io.BytesIO):
+        raw = source.getvalue()
+        return io.BytesIO(raw), raw
+
+    if hasattr(source, "getvalue"):
+        raw = source.getvalue()
+        return io.BytesIO(raw), raw
+
+    if hasattr(source, "read"):
+        pos = source.tell() if hasattr(source, "tell") else None
+        raw = source.read()
+        if pos is not None:
+            source.seek(pos)
+        return io.BytesIO(raw), raw
+
+    raise TypeError("Unsupported data source for Excel loading")
+
+
+def _strip_conditional_formatting(raw_bytes: bytes) -> bytes:
+    """Remove conditional-formatting XML nodes that break openpyxl.
+
+    Some vendor spreadsheets inject proprietary operators (e.g. "LessOrEqual")
+    that openpyxl refuses to parse.  We do not need conditional formatting for
+    analytics, so strip those nodes before re-loading the sanitized workbook.
+    """
+
+    src = io.BytesIO(raw_bytes)
+    dst = io.BytesIO()
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.startswith("xl/worksheets/") and item.filename.endswith(".xml"):
+                text = data.decode("utf-8", errors="ignore")
+                cleaned = re.sub(
+                    r"<conditionalFormatting[\s\S]*?</conditionalFormatting>",
+                    "",
+                    text,
+                    flags=re.MULTILINE,
+                )
+                data = cleaned.encode("utf-8")
+            zout.writestr(item, data)
+    return dst.getvalue()
+
+
+def _load_with_openpyxl(source: Union[str, os.PathLike, io.BytesIO]) -> Dict[str, pd.DataFrame]:
+    workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False)
+    frames: Dict[str, pd.DataFrame] = {}
+    for ws in workbook.worksheets:
+        rows = list(ws.values)
+        if not rows:
+            frames[ws.title] = pd.DataFrame()
+            continue
+        header = rows[0]
+        data = rows[1:]
+        frames[ws.title] = pd.DataFrame(data, columns=header)
+    return frames
+
+
+@st.cache_data(show_spinner=False)
+def load_excel(path: Union[str, os.PathLike, io.BytesIO, bytes]) -> Dict[str, pd.DataFrame]:
+    prepared, raw_bytes = _ensure_bytes_buffer(path)
     try:
-        return f"{float(v):.{decimals}%}"
+        xls = pd.ExcelFile(prepared, engine="openpyxl")
+        return {sheet: pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names}
+    except ValueError as exc:
+        # Certain workbooks include conditional-format operators unsupported by
+        # openpyxl's parser.  Fall back to loading via openpyxl directly so we
+        # can ignore the problematic formatting while keeping the cell values.
+        if "Value must be one of" not in str(exc) and "Conditional Formatting" not in str(exc):
+            raise
+        fallback_source: Union[str, os.PathLike, io.BytesIO]
+        if isinstance(prepared, (str, os.PathLike)):
+            with open(prepared, "rb") as fh:
+                buffer_bytes = fh.read()
+        else:
+            buffer_bytes = raw_bytes if raw_bytes is not None else prepared.getvalue()
+        sanitized = _strip_conditional_formatting(buffer_bytes)
+        fallback_source = io.BytesIO(sanitized)
+        return _load_with_openpyxl(fallback_source)
+
+
+def format_percent(value: float | int | str, decimals: int = 1) -> str:
+    if pd.isna(value):
+        return "—"
+    try:
+        return f"{float(value):.{decimals}%}"
     except Exception:
-        return v
+        return str(value)
 
 
-@st.cache_data
-def load_excel(file):
-    xls = pd.ExcelFile(file)
-    dfs = {name: pd.read_excel(file, sheet_name=name) for name in xls.sheet_names}
-    return dfs
+def format_number(value: float | int | str, decimals: int = 2, suffix: str = "") -> str:
+    if pd.isna(value):
+        return "—"
+    try:
+        return f"{float(value):,.{decimals}f}{suffix}"
+    except Exception:
+        return str(value)
 
-def clean_summary(df):
-    df = df.copy()
-    # Standardize columns (handle both cleaned + original headers)
-    cols = {c.lower().strip(): c for c in df.columns}
-    def get_col(*cands):
-        for c in cands:
-            if c in df.columns: return c
-            lc = c.lower()
-            for k in cols:
-                if k == lc:
-                    return cols[k]
+
+def min_max_scale(series: pd.Series) -> pd.Series:
+    s = series.astype(float)
+    valid = s.dropna()
+    if valid.empty:
+        return pd.Series(0.0, index=series.index)
+    min_val, max_val = valid.min(), valid.max()
+    if min_val == max_val:
+        return pd.Series(0.5, index=series.index)
+    scaled = (s - min_val) / (max_val - min_val)
+    return scaled.fillna(0.0)
+
+
+def prepare_chart_data(
+    df: pd.DataFrame,
+    required_columns: Iterable[Optional[str]],
+    size_column: Optional[str] = None,
+) -> Optional[pd.DataFrame]:
+    cols = [c for c in required_columns if c]
+    if not cols:
         return None
+    subset = df.dropna(subset=cols)
+    if subset.empty:
+        return None
+    subset = subset.copy()
+    if size_column and size_column in subset.columns:
+        subset.loc[:, size_column] = subset[size_column].fillna(0)
+    return subset
 
-    # Map possible names
-    aum_col = get_col("AUM ($B)", "AUM_Billions")
-    ytd_col = get_col("YTD %", "YTD_Percent")
-    r1_col  = get_col("1Y %", "1Y_Percent")
-    r3_col  = get_col("3Y % (Total Return)", "3Y_Total_Return_Percent")
-    r5_col  = get_col("5Y % (Total Return)", "5Y_Total_Return_Percent")
-    dd_col  = get_col("Max Drawdown (3Y)", "Max_Drawdown_3Y")
-    exp_col = get_col("Expense Ratio", "Expense_Ratio")
-    div_col = get_col("Dividend Yield %", "Dividend_Yield_Percent")
-    top10_col = get_col("Top-10 Weight %", "Top_10_Weight_Percent")
-    adv_col = get_col("Average Daily Dollar Volume 3M", "Avg_Daily_Dollar_Volume_3M")
-    etf_col = get_col("ETF")
-    theme_col = get_col("Theme")
 
-    # Coerce numeric (AUM stays as number, percent-like fields are stored as FRACTIONS 0–1)
-    if aum_col in df:
-        df[aum_col] = pd.to_numeric(
-            df[aum_col]
-              .astype(str)
-              .str.replace(r'[^0-9\.\-]', '', regex=True)  # remove $, B, commas, spaces
-              .str.strip(),
-            errors="coerce"  # invalid entries become NaN safely
+def pick_identifier(df: pd.DataFrame, cols: ColumnMap) -> Optional[str]:
+    for candidate in (cols.symbol, cols.fund_name):
+        if candidate and candidate in df.columns:
+            return candidate
+    return None
+
+
+def hover_columns(df: pd.DataFrame, cols: ColumnMap) -> List[str]:
+    return [c for c in (cols.symbol, cols.fund_name) if c and c in df.columns]
+
+
+def build_score(df: pd.DataFrame, weights: Dict[str, float], cols: ColumnMap) -> pd.Series:
+    def _mean_of(columns: List[Optional[str]]) -> pd.Series:
+        frames = [df[c] for c in columns if c in df.columns]
+        if not frames:
+            return pd.Series(0.0, index=df.index)
+        return pd.concat(frames, axis=1).mean(axis=1, skipna=True)
+
+    returns = _mean_of([
+        cols.ytd_perf,
+        cols.perf_1y,
+        cols.perf_3y,
+        cols.perf_5y,
+        cols.perf_10y,
+        cols.return_3y,
+        cols.return_5y,
+        cols.return_10y,
+    ])
+    income = _mean_of([cols.yield_fwd, cols.yield_ttm, cols.div_growth_3y, cols.div_growth_5y])
+    quality = _mean_of([cols.quant_rating, cols.sa_rating])
+    risk = _mean_of([cols.expense_ratio, cols.beta_60m])
+
+    components = {
+        "returns": min_max_scale(returns),
+        "income": min_max_scale(income),
+        "quality": min_max_scale(quality),
+        "risk": 1 - min_max_scale(risk),  # lower expense/beta = better
+    }
+
+    total_weight = sum(weights.values()) or 1.0
+    score = sum(components[name] * weights[name] for name in components)
+    score = score / total_weight
+    return score
+
+
+def display_metric(col, label: str, value: str, delta: Optional[str] = None):
+    try:
+        col.metric(label, value, delta)
+    except Exception:
+        col.write(f"**{label}:** {value}")
+
+
+def build_filter_options(df: pd.DataFrame, column: Optional[str]) -> List[str]:
+    """Return sorted distinct values for a sidebar filter."""
+
+    if column and column in df.columns:
+        values = (
+            df[column]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace({"": pd.NA})
+            .dropna()
+            .unique()
         )
-
-    for col in [ytd_col, r1_col, r3_col, r5_col, dd_col, exp_col, div_col, top10_col, adv_col]:
-        if col in df:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # --- KEY FIX: normalize Top-10 Weight to a fraction (0–1) if it's 100× too small ---
-    if top10_col in df and df[top10_col].notna().any():
-        # If values look like 0.0059 (0.59%) instead of 0.59 (59%), scale ×100
-        if df[top10_col].max() < 0.02:
-            df[top10_col] = df[top10_col] * 100.0
-
-    return df, dict(aum=aum_col, ytd=ytd_col, r1=r1_col, r3=r3_col, r5=r5_col, dd=dd_col,
-                    exp=exp_col, div=div_col, top10=top10_col, adv=adv_col, etf=etf_col, theme=theme_col)
-
-def clean_holdings(df):
-    df = df.copy()
-    # Normalize column names
-    df.columns = [c.strip() for c in df.columns]
-
-    # Standardize weight column name
-    if "Weight_Percent" not in df.columns and "Weight %" in df.columns:
-        df = df.rename(columns={"Weight %": "Weight_Percent"})
-
-    # Coerce numeric
-    if "Weight_Percent" in df:
-        df["Weight_Percent"] = pd.to_numeric(df["Weight_Percent"], errors="coerce")
-
-        # --- KEY FIX: normalize to FRACTIONS (0–1) per ETF ---
-        # If an ETF's median weight > 1, it’s in percent (0–100) → divide by 100.
-        med = df.groupby("ETF")["Weight_Percent"].median()
-        percent_scale = med[med > 1].index
-        df.loc[df["ETF"].isin(percent_scale), "Weight_Percent"] = (
-            df.loc[df["ETF"].isin(percent_scale), "Weight_Percent"] / 100.0
-        )
-
-    return df
+        return sorted(values)
+    return []
 
 
-# Sidebar — file input
+def sanitize_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert object columns into Arrow-friendly dtypes for st.dataframe."""
 
-st.sidebar.header("Data")
+    if df.empty:
+        return df
 
-# Check Streamlit secret flag for owner mode
-is_owner = st.secrets.get("OWNER", "").lower() == "yes"
+    replacements = {val: pd.NA for val in DISPLAY_MISSING_VALUES}
+    safe = df.copy()
+    for column in safe.columns:
+        series = safe[column]
+        if pd.api.types.is_object_dtype(series):
+            series = series.replace(replacements)
+            if series.map(lambda v: isinstance(v, (datetime, date, pd.Timestamp))).any():
+                safe[column] = pd.to_datetime(series, errors="coerce")
+                continue
+            numeric = pd.to_numeric(series, errors="coerce")
+            if numeric.notna().mean() > 0.6:
+                safe[column] = numeric
+            else:
+                safe[column] = series.astype("string")
+        else:
+            safe[column] = series
+    return safe
 
-if is_owner:
-    uploaded = st.sidebar.file_uploader("Upload Excel (AI_Ecosystem_ETFs file)", type=["xlsx"])
-    st.sidebar.success("Owner mode enabled — you can upload a new dataset.")
+
+# ---------------------------------------------------------------------------
+# Sidebar (data source + filters)
+# ---------------------------------------------------------------------------
+
+
+st.sidebar.header("Data source")
+uploaded_file = st.sidebar.file_uploader("Upload Excel workbook", type=["xlsx"])
+default_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
+
+if uploaded_file is not None:
+    workbook = load_excel(uploaded_file)
+elif os.path.exists(default_path):
+    workbook = load_excel(default_path)
 else:
-    st.sidebar.info("Static dashboard (viewer mode)")
-
-# Always prefer uploaded when in owner mode; otherwise load bundled dataset
-demo_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
-
-if is_owner and uploaded is not None:
-    dfs = load_excel(uploaded)
-else:
-    if os.path.exists(demo_path):
-        dfs = load_excel(demo_path)
-    else:
-        st.error(
-            "Dataset not found. Please include AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx "
-            "in the repo, or set OWNER=yes in secrets and upload a file."
-        )
-        st.stop()
-
-sheet_names = list(dfs.keys())
-list(dfs.keys())
-summary = dfs.get("Summary")
-holdings = dfs.get("Holdings")
-glossary = dfs.get("Glossary")
-
-if summary is None or holdings is None:
-    st.error("Expected sheets 'Summary' and 'Holdings' were not found.")
+    st.error(
+        "No Excel file found. Upload a workbook or include "
+        "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx in the project."
+    )
     st.stop()
 
-summary, sm = clean_summary(summary)
-holdings = clean_holdings(holdings)
+sheet_name = st.sidebar.selectbox("Sheet for ETF analytics", list(workbook.keys()))
+raw_df = workbook[sheet_name]
+etf_df, columns_map = clean_etf_sheet(raw_df)
 
-# --- Top KPIs ---
-col1, col2, col3, col4 = st.columns(4)
-if sm['aum'] and sm['etf']:
-    total_aum = summary[sm['aum']].sum()
-    col1.metric("Total AUM ($B)", f"{total_aum:,.2f}")
-if sm['exp']:
-    col2.metric("Median Expense Ratio", f"{summary[sm['exp']].median():.3%}")
-if sm['r1']:
-    col3.metric("Median 1Y Return", f"{summary[sm['r1']].median():.2%}")
-if sm['dd']:
-    col4.metric("Median Max Drawdown (3Y)", f"{summary[sm['dd']].median():.2%}")
-
-st.markdown("---")
-
-# --- ETF Filters ---
-etf_list = summary[sm['etf']].dropna().astype(str).unique().tolist() if sm['etf'] else []
-selected_etfs = st.multiselect("Select ETFs", etf_list, default=etf_list)
-summary_f = summary[summary[sm['etf']].isin(selected_etfs)] if sm['etf'] else summary
-
-# --- AUM Bar ---
-if sm['aum'] and sm['etf'] and not summary_f.empty:
-    st.subheader("AUM by ETF ($B)")
-    chart_aum = alt.Chart(summary_f).mark_bar().encode(
-        x=alt.X(f"{sm['etf']}:N", title="ETF", sort='-y'),
-        y=alt.Y(f"{sm['aum']}:Q", title="AUM ($B)"),
-        tooltip=[sm['etf'], sm['theme'], sm['aum'], sm['exp']]
-    ).properties(height=320)
-    st.altair_chart(chart_aum, use_container_width=True)
-
-cols = st.columns(2)
-
-# --- Risk vs Return ---
-with cols[0]:
-    if sm['r5'] and sm['dd'] and sm['etf'] and not summary_f.empty:
-        st.subheader("Risk vs Return")
-        scatter = alt.Chart(summary_f).mark_point(size=120).encode(
-            x=alt.X(f"{sm['dd']}:Q", title="Max Drawdown (3Y)", axis=alt.Axis(format='.1%')),
-            y=alt.Y(f"{sm['r5']}:Q", title="5Y % Total Return", axis=alt.Axis(format='.1%')),
-            color=alt.Color(f"{sm['theme']}:N", title="Theme") if sm['theme'] else alt.value("steelblue"),
-            tooltip=[sm['etf'], sm['theme'], alt.Tooltip(f"{sm['dd']}:Q", format='.1%'), alt.Tooltip(f"{sm['r5']}:Q", format='.1%')]
-        )
-        text = alt.Chart(summary_f).mark_text(dy=-10).encode(
-            x=f"{sm['dd']}:Q",
-            y=f"{sm['r5']}:Q",
-            text=f"{sm['etf']}:N"
-        )
-        st.altair_chart((scatter + text).interactive(), use_container_width=True)
-
-# --- Expense Ratio vs 5Y Return ---
-with cols[1]:
-    if sm['exp'] and sm['r5'] and sm['etf'] and not summary_f.empty:
-        st.subheader("Expense Ratio vs 5Y Return")
-        exp_chart = alt.Chart(summary_f).mark_circle(size=120).encode(
-            x=alt.X(f"{sm['exp']}:Q", title="Expense Ratio", axis=alt.Axis(format='.1%')),
-            y=alt.Y(f"{sm['r5']}:Q", title="5Y % Total Return", axis=alt.Axis(format='.1%')),
-            color=alt.Color(f"{sm['theme']}:N", title="Theme") if sm['theme'] else alt.value("orange"),
-            tooltip=[sm['etf'], alt.Tooltip(f"{sm['exp']}:Q", format='.1%'), alt.Tooltip(f"{sm['r5']}:Q", format='.1%')]
-        )
-        labels = alt.Chart(summary_f).mark_text(dy=-10).encode(
-            x=f"{sm['exp']}:Q",
-            y=f"{sm['r5']}:Q",
-            text=f"{sm['etf']}:N"
-        )
-        st.altair_chart((exp_chart + labels).interactive(), use_container_width=True)
+if etf_df.empty:
+    st.error("The selected sheet does not contain data.")
+    st.stop()
 
 
-st.markdown("---")
-st.subheader("Summary Table")
+# Sidebar filters -----------------------------------------------------------
+asset_classes = build_filter_options(etf_df, columns_map.asset_class)
+fund_types = build_filter_options(etf_df, columns_map.fund_type)
+issuers = build_filter_options(etf_df, columns_map.issuer)
 
-if not summary_f.empty:
-    # display-friendly copy: format percent columns only (not AUM)
-    summary_display = summary_f.copy()
-    for col in summary_display.columns:
-        if is_percent_col(col):
-            try:
-                summary_display[col] = summary_display[col].map(lambda x: format_percent(x, 2) if pd.notna(x) else x)
-            except Exception:
-                pass
+selected_assets = st.sidebar.multiselect("Asset Class", asset_classes, default=asset_classes)
+selected_fund_types = st.sidebar.multiselect("Fund Type", fund_types, default=fund_types)
+selected_issuers = st.sidebar.multiselect("Issuer", issuers, default=issuers)
 
-    # Optional quick search across ETF/Theme
-    search_summary = st.text_input("Search summary (ETF or Theme)", "")
-    sf = summary_display.copy()
-    etf_col = sm.get('etf')
-    theme_col = sm.get('theme')
-    if search_summary and (etf_col or theme_col):
-        mask = pd.Series([True]*len(sf))
-        if etf_col in sf.columns:
-            mask &= sf[etf_col].astype(str).str.contains(search_summary, case=False, na=False)
-        if theme_col in sf.columns:
-            mask |= sf[theme_col].astype(str).str.contains(search_summary, case=False, na=False)
-        sf = sf[mask]
-    st.dataframe(sf, use_container_width=True, hide_index=True)
+
+filtered = etf_df.copy()
+if columns_map.asset_class and selected_assets:
+    filtered = filtered[filtered[columns_map.asset_class].astype(str).isin(selected_assets)]
+if columns_map.fund_type and selected_fund_types:
+    filtered = filtered[filtered[columns_map.fund_type].astype(str).isin(selected_fund_types)]
+if columns_map.issuer and selected_issuers:
+    filtered = filtered[filtered[columns_map.issuer].astype(str).isin(selected_issuers)]
+
+search_symbol = st.sidebar.text_input("Search symbol or fund name")
+if search_symbol:
+    mask = pd.Series(True, index=filtered.index)
+    if columns_map.symbol in filtered.columns:
+        mask &= filtered[columns_map.symbol].astype(str).str.contains(search_symbol, case=False, na=False)
+    if columns_map.fund_name in filtered.columns:
+        mask |= filtered[columns_map.fund_name].astype(str).str.contains(search_symbol, case=False, na=False)
+    filtered = filtered[mask]
+
+
+# Metrics section -----------------------------------------------------------
+
+st.title("ETF Lab: analytics-ready dashboard")
+st.caption("Upload your Excel file, explore risk, and surface the best ETFs using your metrics.")
+
+metric_cols = st.columns(4)
+
+if columns_map.aum and columns_map.aum in filtered.columns:
+    total_aum = filtered[columns_map.aum].sum()
+    display_metric(metric_cols[0], "Total AUM", format_number(total_aum / 1_000_000_000, 2, "B"))
 else:
-    st.info("No data in Summary after filters.")
+    display_metric(metric_cols[0], "Total AUM", "Data missing")
 
-st.markdown("---")
-st.subheader("Holdings Analyzer")
-
-# Filter holdings by ETF selection
-if "ETF" in holdings.columns:
-    holdings_f = holdings[holdings["ETF"].astype(str).isin(selected_etfs)] if selected_etfs else holdings.copy()
+if columns_map.expense_ratio and columns_map.expense_ratio in filtered.columns:
+    median_expense = filtered[columns_map.expense_ratio].median()
+    display_metric(metric_cols[1], "Median Expense Ratio", format_percent(median_expense, 2))
 else:
-    holdings_f = holdings.copy()
+    display_metric(metric_cols[1], "Median Expense Ratio", "—")
 
-left, right = st.columns(2)
+if columns_map.perf_1y and columns_map.perf_1y in filtered.columns:
+    median_1y = filtered[columns_map.perf_1y].median()
+    display_metric(metric_cols[2], "Median 1Y Perf", format_percent(median_1y, 2))
+else:
+    display_metric(metric_cols[2], "Median 1Y Perf", "—")
 
-# Treemap by Industry (Plotly) — smart compact mode on drill/one-ETF view
-with left:
-    if {"ETF", "Industry", "Weight_Percent"}.issubset(holdings_f.columns):
-        st.markdown("**Industry Composition (Treemap)**")
+if columns_map.beta_60m and columns_map.beta_60m in filtered.columns:
+    median_beta = filtered[columns_map.beta_60m].median()
+    display_metric(metric_cols[3], "Median 60M Beta", format_number(median_beta, 2))
+else:
+    display_metric(metric_cols[3], "Median 60M Beta", "—")
 
-        # If user filtered to exactly one ETF, switch to compact text automatically
-        one_etf_view = len(selected_etfs) == 1
 
-        # Shorten long industry labels for readability (hover shows full)
-        hf = holdings_f.copy()
-        def _short(s, n=16):
-            s = str(s) if pd.notna(s) else ""
-            return s if len(s) <= n else s[: n - 1] + "…"
-        hf["Industry_Short"] = hf["Industry"].astype(str).map(lambda x: _short(x, 16))
+# Tabs ----------------------------------------------------------------------
 
-        treemap = px.treemap(
-            hf,
-            path=["ETF", "Industry_Short"],           # short label drawn in boxes
-            values="Weight_Percent",
-            hover_data=["Industry", "Ticker", "Holding"] if {"Ticker","Holding"}.issubset(hf.columns) else ["Industry"],
+(
+    overview_tab,
+    risk_tab,
+    income_tab,
+    concentration_tab,
+    issuer_tab,
+    quality_tab,
+    heatmap_tab,
+    cost_tab,
+    top_tab,
+    data_tab,
+) = st.tabs(
+    [
+        "Overview",
+        "Risk & Performance",
+        "Income & Dividends",
+        "Concentration",
+        "Issuer Spotlight",
+        "Quality Radar",
+        "Performance Heatmap",
+        "Cost & Liquidity",
+        "Top 10 ETFs",
+        "Raw Data",
+    ]
+)
+
+
+with overview_tab:
+    left, right = st.columns(2)
+
+    if columns_map.asset_class and columns_map.aum and not filtered.empty:
+        st.subheader("AUM by Asset Class")
+        grouped = (
+            filtered.groupby(columns_map.asset_class)[columns_map.aum]
+            .sum()
+            .reset_index()
         )
+        grouped["AUM (Billions)"] = grouped[columns_map.aum] / 1_000_000_000
+        fig = px.bar(
+            grouped,
+            x=columns_map.asset_class,
+            y="AUM (Billions)",
+            color=columns_map.asset_class,
+            title=None,
+        )
+        fig.update_layout(showlegend=False, height=420)
+        st.plotly_chart(fig, width="stretch")
 
-        if one_etf_view:
-            # Compact text so you see *all* boxes without a wall of labels
-            treemap.update_traces(
-                textinfo="percent entry",             # tiny % only inside boxes
-                textfont=dict(size=10, color="black"),
-                hovertemplate="<b>%{customdata[0]}</b><br>Weight: %{value:.2%}<extra></extra>",
-                tiling=dict(pad=3),
-                marker=dict(line=dict(width=0.5, color="white")),
+    if columns_map.perf_1y and columns_map.aum and columns_map.asset_class:
+        st.subheader("Performance vs. Fund Size")
+        perf_source = prepare_chart_data(filtered, [columns_map.perf_1y, columns_map.aum])
+        if perf_source is not None:
+            scatter = px.scatter(
+                perf_source,
+                x=columns_map.perf_1y,
+                y=columns_map.aum,
+                color=columns_map.asset_class if columns_map.asset_class in perf_source.columns else None,
+                hover_data=hover_columns(perf_source, columns_map),
+                labels={columns_map.perf_1y: "1Y Performance", columns_map.aum: "AUM"},
             )
-            treemap.update_layout(
-                uniformtext=dict(minsize=12, mode="hide"),
-                margin=dict(t=30, l=0, r=0, b=0),
-                height=540,
+            scatter.update_layout(height=420)
+            st.plotly_chart(scatter, width="stretch")
+
+    st.markdown("### Filtered ETFs")
+    display_df = filtered.copy()
+    for col in PERCENT_COLUMNS:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].map(lambda x: format_percent(x, 2))
+    st.dataframe(display_df, width="stretch", hide_index=True)
+
+    csv_buffer = io.StringIO()
+    filtered.to_csv(csv_buffer, index=False)
+    st.download_button(
+        "Download filtered ETFs (CSV)",
+        data=csv_buffer.getvalue(),
+        file_name="filtered_etfs.csv",
+        mime="text/csv",
+        width="stretch",
+    )
+
+
+with risk_tab:
+    st.subheader("Risk diagnostics")
+    col_a, col_b = st.columns(2)
+
+    if columns_map.beta_60m and columns_map.beta_60m in filtered.columns:
+        hist = px.histogram(
+            filtered,
+            x=columns_map.beta_60m,
+            nbins=25,
+            title="Beta distribution",
+        )
+        col_a.plotly_chart(hist, width="stretch")
+
+    scatter_source = prepare_chart_data(
+        filtered,
+        [columns_map.beta_60m, columns_map.perf_1y],
+        size_column=columns_map.aum if columns_map.aum in filtered.columns else None,
+    )
+    if scatter_source is not None:
+        scatter_risk = px.scatter(
+            scatter_source,
+            x=columns_map.beta_60m,
+            y=columns_map.perf_1y,
+            size=columns_map.aum if columns_map.aum in scatter_source.columns else None,
+            color=columns_map.asset_class if columns_map.asset_class in scatter_source.columns else None,
+            hover_data=hover_columns(scatter_source, columns_map),
+            labels={columns_map.beta_60m: "60M Beta", columns_map.perf_1y: "1Y Performance"},
+        )
+        col_b.plotly_chart(scatter_risk, width="stretch")
+
+    if columns_map.expense_ratio and columns_map.yield_ttm:
+        st.subheader("Income vs. Cost")
+        inc_source = prepare_chart_data(
+            filtered, [columns_map.expense_ratio, columns_map.yield_ttm]
+        )
+        if inc_source is not None:
+            income_chart = px.scatter(
+                inc_source,
+                x=columns_map.expense_ratio,
+                y=columns_map.yield_ttm,
+                color=columns_map.asset_class if columns_map.asset_class in inc_source.columns else None,
+                hover_data=hover_columns(inc_source, columns_map),
+                labels={
+                    columns_map.expense_ratio: "Expense Ratio",
+                    columns_map.yield_ttm: "Yield TTM",
+                },
             )
-        else:
-            # Multi-ETF overview: show ETF & compact industry labels
-            treemap.update_traces(
-                textinfo="label+percent parent",
-                textfont=dict(size=12, color="black"),
-                hovertemplate="<b>%{customdata[0]}</b><br>Weight: %{value:.2%}<extra></extra>",
-                tiling=dict(pad=3),
-                marker=dict(line=dict(width=0.5, color="white")),
-                maxdepth=2,                           # ETF + one industry level
+            st.plotly_chart(income_chart, width="stretch")
+
+    st.markdown("#### Risk table")
+    risk_cols = [
+        c
+        for c in [
+            columns_map.symbol,
+            columns_map.fund_name,
+            columns_map.aum,
+            columns_map.beta_60m,
+            columns_map.expense_ratio,
+            columns_map.quant_rating,
+            columns_map.days_quant,
+        ]
+        if c
+    ]
+    risk_table = filtered[risk_cols].copy()
+    if columns_map.aum in risk_table:
+        risk_table[columns_map.aum] = risk_table[columns_map.aum] / 1_000_000_000
+        risk_table = risk_table.rename(columns={columns_map.aum: "AUM (Billions)"})
+    if columns_map.expense_ratio in risk_table:
+        risk_table[columns_map.expense_ratio] = risk_table[columns_map.expense_ratio].map(
+            lambda x: format_percent(x, 2)
+        )
+    st.dataframe(risk_table, width="stretch", hide_index=True)
+
+
+with income_tab:
+    st.subheader("Income & dividend dashboard")
+    col_income_a, col_income_b = st.columns(2)
+
+    income_scatter = prepare_chart_data(
+        filtered,
+        [columns_map.yield_ttm, columns_map.div_growth_3y],
+        size_column=columns_map.aum if columns_map.aum in filtered.columns else None,
+    )
+    if income_scatter is not None:
+        fig_income = px.scatter(
+            income_scatter,
+            x=columns_map.yield_ttm,
+            y=columns_map.div_growth_3y,
+            size=columns_map.aum if columns_map.aum in income_scatter.columns else None,
+            color=columns_map.asset_class if columns_map.asset_class in income_scatter.columns else None,
+            hover_data=hover_columns(income_scatter, columns_map),
+            labels={
+                columns_map.yield_ttm: "Yield TTM",
+                columns_map.div_growth_3y: "Dividend growth 3Y",
+            },
+        )
+        col_income_a.plotly_chart(fig_income, width="stretch")
+
+    if columns_map.yield_ttm:
+        top_income = filtered.dropna(subset=[columns_map.yield_ttm]).nlargest(
+            10, columns_map.yield_ttm
+        )
+        if not top_income.empty:
+            income_identifier = pick_identifier(top_income, columns_map)
+            x_axis = income_identifier if income_identifier else top_income.index.astype(str)
+            bar_income = px.bar(
+                top_income,
+                x=x_axis,
+                y=columns_map.yield_ttm,
+                color=columns_map.asset_class if columns_map.asset_class in top_income.columns else None,
+                title="Top 10 yields",
             )
-            treemap.update_layout(
-                uniformtext=dict(minsize=10, mode="hide"),
-                margin=dict(t=30, l=0, r=0, b=0),
-                height=540,
+            col_income_b.plotly_chart(bar_income, width="stretch")
+
+    stats_cols = [
+        col
+        for col in [
+            columns_map.yield_ttm,
+            columns_map.yield_fwd,
+            columns_map.div_growth_3y,
+            columns_map.div_growth_5y,
+        ]
+        if col in filtered.columns
+    ]
+    if stats_cols:
+        summary = filtered[stats_cols].describe().T
+        st.dataframe(summary, width="stretch")
+
+
+with concentration_tab:
+    st.subheader("Concentration & holdings analysis")
+    scatter_conc = prepare_chart_data(
+        filtered, [columns_map.holdings_count, columns_map.top10_weight]
+    )
+    if scatter_conc is not None:
+        conc_chart = px.scatter(
+            scatter_conc,
+            x=columns_map.holdings_count,
+            y=columns_map.top10_weight,
+            color=columns_map.asset_class if columns_map.asset_class in scatter_conc.columns else None,
+            hover_data=hover_columns(scatter_conc, columns_map),
+            labels={
+                columns_map.holdings_count: "Number of holdings",
+                columns_map.top10_weight: "Weight of top 10",
+            },
+        )
+        st.plotly_chart(conc_chart, width="stretch")
+
+    if columns_map.top10_weight:
+        most_concentrated = filtered.dropna(subset=[columns_map.top10_weight]).nlargest(
+            10, columns_map.top10_weight
+        )
+        if not most_concentrated.empty:
+            st.markdown("#### Most concentrated funds")
+            display_cols = [
+                c
+                for c in [columns_map.symbol, columns_map.fund_name, columns_map.top10_weight]
+                if c and c in most_concentrated.columns
+            ]
+            st.dataframe(
+                most_concentrated[display_cols],
+                hide_index=True,
+                width="stretch",
             )
 
-        st.plotly_chart(treemap, use_container_width=True)
 
-        # Optional: in one-ETF view, show a tidy ranked table on the right
-        if one_etf_view:
-            st.markdown("**Industries (sorted by weight)**")
-            tbl = (
-                hf[hf["ETF"].isin(selected_etfs)]
-                .groupby("Industry", as_index=False)["Weight_Percent"]
-                .sum()
-                .sort_values("Weight_Percent", ascending=False)
+with issuer_tab:
+    st.subheader("Issuer spotlight")
+    if columns_map.issuer and columns_map.aum:
+        agg_map = {columns_map.aum: "sum"}
+        if columns_map.perf_1y:
+            agg_map[columns_map.perf_1y] = "mean"
+        if columns_map.expense_ratio:
+            agg_map[columns_map.expense_ratio] = "mean"
+        rename_map = {columns_map.aum: "total_aum"}
+        if columns_map.perf_1y:
+            rename_map[columns_map.perf_1y] = "avg_perf"
+        if columns_map.expense_ratio:
+            rename_map[columns_map.expense_ratio] = "avg_expense"
+        issuer_group = (
+            filtered.groupby(columns_map.issuer)
+            .agg(agg_map)
+            .reset_index()
+            .rename(columns=rename_map)
+            .sort_values("total_aum", ascending=False)
+        )
+        if not issuer_group.empty:
+            issuer_group["AUM (Billions)"] = issuer_group["total_aum"] / 1_000_000_000
+            hover_cols = [c for c in ["avg_perf", "avg_expense"] if c in issuer_group.columns]
+            fig_issuer = px.bar(
+                issuer_group.head(15),
+                x=columns_map.issuer,
+                y="AUM (Billions)",
+                hover_data=hover_cols,
             )
-            tbl["Weight"] = (tbl["Weight_Percent"] * 100).round(2).astype(str) + "%"
-            st.dataframe(tbl[["Industry", "Weight"]], use_container_width=True, hide_index=True)
+            st.plotly_chart(fig_issuer, width="stretch")
+            st.dataframe(
+                issuer_group,
+                width="stretch",
+                hide_index=True,
+            )
 
 
-        
-# Stacked bar by Country
-with right:
-    if {"ETF", "Country", "Weight_Percent"}.issubset(holdings_f.columns):
-        st.markdown("**Country Breakdown (Stacked Bar)**")
-        country_pivot = holdings_f.pivot_table(index="Country", columns="ETF", values="Weight_Percent", aggfunc="sum").fillna(0)
-        country_pivot = country_pivot.reset_index().melt(id_vars="Country", var_name="ETF", value_name="Weight_Percent")
-        bar = alt.Chart(country_pivot).mark_bar().encode(
-            x=alt.X("Country:N", sort='-y'),
-            y=alt.Y("Weight_Percent:Q", stack="normalize", title="Share of Weight", axis=alt.Axis(format='.0%')),
-            color="ETF:N",
-            tooltip=["Country", "ETF", alt.Tooltip("Weight_Percent:Q", format=".2f")]
-        ).properties(height=320)
-        st.altair_chart(bar, use_container_width=True)
+with quality_tab:
+    st.subheader("Quality radar")
+    q_col1, q_col2 = st.columns(2)
+
+    if columns_map.quant_rating and columns_map.quant_rating in filtered.columns:
+        quant_hist = px.histogram(
+            filtered,
+            x=columns_map.quant_rating,
+            nbins=20,
+            title="Quant rating distribution",
+        )
+        q_col1.plotly_chart(quant_hist, width="stretch")
+
+    quality_source = prepare_chart_data(
+        filtered, [columns_map.quant_rating, columns_map.sa_rating]
+    )
+    if quality_source is not None:
+        quality_scatter = px.scatter(
+            quality_source,
+            x=columns_map.quant_rating,
+            y=columns_map.sa_rating,
+            color=columns_map.asset_class if columns_map.asset_class in quality_source.columns else None,
+            hover_data=hover_columns(quality_source, columns_map),
+            labels={
+                columns_map.quant_rating: "Quant rating",
+                columns_map.sa_rating: "SA analyst rating",
+            },
+        )
+        q_col2.plotly_chart(quality_scatter, width="stretch")
+
+    radar_entries = []
+    metric_map = [
+        ("Quant rating", columns_map.quant_rating),
+        ("SA rating", columns_map.sa_rating),
+        ("Dividend growth 5Y", columns_map.div_growth_5y),
+        ("Dividend growth 3Y", columns_map.div_growth_3y),
+        ("Yield TTM", columns_map.yield_ttm),
+    ]
+    for label, col in metric_map:
+        if col and col in filtered.columns:
+            radar_entries.append({"Metric": label, "Score": filtered[col].mean()})
+    if radar_entries:
+        radar_df = pd.DataFrame(radar_entries)
+        radar_fig = px.line_polar(
+            radar_df,
+            r="Score",
+            theta="Metric",
+            line_close=True,
+        )
+        st.plotly_chart(radar_fig, width="stretch")
 
 
-# Holdings table (filter + search)
-st.markdown("### Holdings Table")
-if not holdings_f.empty:
-    display_df = holdings_f.copy()
-    # Format percent-looking columns as percentages for display only (do not touch underlying for charts)
-    for col in display_df.columns:
-        if is_percent_col(col):
-            try:
-                display_df[col] = display_df[col].map(lambda x: format_percent(x, 2) if pd.notna(x) else x)
-            except Exception:
-                pass
-    search = st.text_input("Search holdings (by Ticker or Name)", "")
-    hf = display_df.copy()
-    if search:
-        mask = pd.Series([True]*len(hf))
-        for col in ["Ticker", "Holding", "Industry", "Country"]:
-            if col in hf.columns:
-                mask &= hf[col].astype(str).str.contains(search, case=False, na=False)
-        hf = hf[mask]
-    st.dataframe(hf, use_container_width=True, hide_index=True)
+with heatmap_tab:
+    st.subheader("Performance heatmap")
+    perf_cols = [
+        col
+        for col in [
+            columns_map.ytd_perf,
+            columns_map.perf_1y,
+            columns_map.perf_3y,
+            columns_map.perf_5y,
+            columns_map.perf_10y,
+            columns_map.return_3y,
+            columns_map.return_5y,
+            columns_map.return_10y,
+        ]
+        if col in filtered.columns
+    ]
+    if perf_cols:
+        identifier = pick_identifier(filtered, columns_map)
+        selected_cols = ([identifier] if identifier else []) + perf_cols
+        heatmap_df = filtered[selected_cols].dropna(subset=perf_cols, how="all")
+        if identifier and identifier in heatmap_df.columns:
+            heatmap_df = heatmap_df.set_index(identifier)
+        heatmap_df = heatmap_df.head(40)
+        if not heatmap_df.empty:
+            heatmap_fig = px.imshow(
+                heatmap_df,
+                aspect="auto",
+                color_continuous_scale="RdYlGn",
+                labels=dict(color="Performance"),
+            )
+            st.plotly_chart(heatmap_fig, width="stretch")
 
-# Downloads
-st.markdown("---")
-col_a, col_b = st.columns(2)
-with col_a:
-    if st.button("Download cleaned Summary + Holdings (CSV in ZIP)", type="primary"):
-        import io, zipfile
-        buff = io.BytesIO()
-        with zipfile.ZipFile(buff, "w", zipfile.ZIP_DEFLATED) as zf:
-            summ = summary_f if not summary_f.empty else summary
-            zf.writestr("Summary.csv", summ.to_csv(index=False))
-            zf.writestr("Holdings.csv", holdings_f.to_csv(index=False))
-        st.download_button("Save ZIP", data=buff.getvalue(), file_name="AI_ETFs_cleaned.zip", mime="application/zip")
 
-# Glossary
-if isinstance(dfs.get("Glossary"), pd.DataFrame):
-    with st.expander("Glossary"):
-        st.dataframe(dfs["Glossary"], use_container_width=True, hide_index=True)
+with cost_tab:
+    st.subheader("Cost & liquidity diagnostics")
+    cost_cols = st.columns(2)
 
-st.caption("Tip: Connect this file to Google Sheets or Looker Studio for live dashboards.")
+    if columns_map.expense_ratio:
+        expense_box = px.box(
+            filtered,
+            y=columns_map.expense_ratio,
+            points="all",
+            title="Expense ratio spread",
+        )
+        cost_cols[0].plotly_chart(expense_box, width="stretch")
+
+    if columns_map.aum and columns_map.expense_ratio:
+        cost_source = prepare_chart_data(
+            filtered, [columns_map.aum, columns_map.expense_ratio], columns_map.aum
+        )
+        if cost_source is not None:
+            bubble = px.scatter(
+                cost_source,
+                x=columns_map.expense_ratio,
+                y=columns_map.aum,
+                size=columns_map.aum,
+                color=columns_map.asset_class if columns_map.asset_class in cost_source.columns else None,
+                hover_data=hover_columns(cost_source, columns_map),
+                labels={
+                    columns_map.expense_ratio: "Expense ratio",
+                    columns_map.aum: "AUM",
+                },
+            )
+            cost_cols[1].plotly_chart(bubble, width="stretch")
+
+    if columns_map.aum and columns_map.aum in filtered.columns:
+        aum_hist = px.histogram(
+            filtered,
+            x="aum_billions" if "aum_billions" in filtered.columns else columns_map.aum,
+            nbins=30,
+            title="Liquidity (AUM) distribution",
+        )
+        st.plotly_chart(aum_hist, width="stretch")
+
+
+with top_tab:
+    st.subheader("Top ETFs based on your metrics")
+    st.write(
+        "Scores combine returns, income, quality, and risk. Adjust the weights to align "
+        "with your investment policy, then review the top 10 ideas."
+    )
+
+    weight_cols = st.columns(4)
+    return_weight = weight_cols[0].slider("Returns weight", 0.0, 4.0, 2.0, 0.1)
+    income_weight = weight_cols[1].slider("Income weight", 0.0, 4.0, 1.0, 0.1)
+    quality_weight = weight_cols[2].slider("Quality weight", 0.0, 4.0, 1.0, 0.1)
+    risk_weight = weight_cols[3].slider("Risk control weight", 0.0, 4.0, 2.0, 0.1)
+
+    weights = {
+        "returns": return_weight,
+        "income": income_weight,
+        "quality": quality_weight,
+        "risk": risk_weight,
+    }
+
+    scores = build_score(filtered, weights, columns_map)
+    top_frame = filtered.copy()
+    top_frame["ETF Score"] = scores
+    top10 = top_frame.sort_values("ETF Score", ascending=False).head(10)
+
+    if not top10.empty:
+        st.markdown("#### Ranked list")
+        score_cols = [
+            columns_map.symbol,
+            columns_map.fund_name,
+            columns_map.asset_class,
+            columns_map.aum,
+            columns_map.expense_ratio,
+            columns_map.perf_1y,
+            columns_map.perf_3y,
+            columns_map.perf_5y,
+            columns_map.yield_ttm,
+            columns_map.beta_60m,
+            "ETF Score",
+        ]
+        score_cols = [c for c in score_cols if c in top10.columns]
+        table = top10[score_cols].copy()
+        if columns_map.aum in table.columns:
+            table[columns_map.aum] = table[columns_map.aum] / 1_000_000_000
+            table = table.rename(columns={columns_map.aum: "AUM (Billions)"})
+        for col in PERCENT_COLUMNS:
+            if col in table.columns:
+                table[col] = table[col].map(lambda x: format_percent(x, 2))
+        table["ETF Score"] = table["ETF Score"].map(lambda x: f"{x:.3f}")
+        st.dataframe(table, hide_index=True, width="stretch")
+
+        bar = px.bar(
+            top10,
+            x=pick_identifier(top10, columns_map) or top10.index,
+            y="ETF Score",
+            color=columns_map.asset_class if columns_map.asset_class in top10.columns else None,
+            hover_data=[columns_map.fund_name] if columns_map.fund_name in top10.columns else None,
+        )
+        bar.update_layout(height=420)
+        st.plotly_chart(bar, width="stretch")
+    else:
+        st.info("No ETFs remain after filtering.")
+
+
+with data_tab:
+    st.subheader("Raw workbook preview")
+    selected_sheet = st.selectbox("Preview sheet", list(workbook.keys()), index=list(workbook.keys()).index(sheet_name))
+    safe_sheet = sanitize_for_display(workbook[selected_sheet])
+    st.dataframe(safe_sheet, width="stretch", hide_index=True)
+
