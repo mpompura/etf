@@ -394,6 +394,23 @@ def display_metric(col, label: str, value: str, delta: Optional[str] = None):
         col.write(f"**{label}:** {value}")
 
 
+def build_filter_options(df: pd.DataFrame, column: Optional[str]) -> List[str]:
+    """Return sorted distinct values for a sidebar filter."""
+
+    if column and column in df.columns:
+        values = (
+            df[column]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace({"": pd.NA})
+            .dropna()
+            .unique()
+        )
+        return sorted(values)
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Sidebar (data source + filters)
 # ---------------------------------------------------------------------------
@@ -422,21 +439,11 @@ if etf_df.empty:
     st.error("The selected sheet does not contain data.")
     st.stop()
 
-asset_classes = build_filter_options(columns_map.asset_class)
-fund_types = build_filter_options(columns_map.fund_type)
-issuers = build_filter_options(columns_map.issuer)
 
 # Sidebar filters -----------------------------------------------------------
-def build_filter_options(column: Optional[str]) -> List[str]:
-    if column and column in etf_df.columns:
-        values = sorted(etf_df[column].dropna().astype(str).unique())
-        return values
-    return []
-
-
-asset_classes = build_filter_options(columns_map.asset_class)
-fund_types = build_filter_options(columns_map.fund_type)
-issuers = build_filter_options(columns_map.issuer)
+asset_classes = build_filter_options(etf_df, columns_map.asset_class)
+fund_types = build_filter_options(etf_df, columns_map.fund_type)
+issuers = build_filter_options(etf_df, columns_map.issuer)
 
 selected_assets = st.sidebar.multiselect("Asset Class", asset_classes, default=asset_classes)
 selected_fund_types = st.sidebar.multiselect("Fund Type", fund_types, default=fund_types)
