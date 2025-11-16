@@ -36,38 +36,49 @@ st.set_page_config(
 
 CANONICAL_COLUMNS: Dict[str, Iterable[str]] = {
     "rank": ["rank"],
-    "symbol": ["symbol", "ticker"],
-    "fund_name": ["fund name", "fund"],
+    "symbol": ["symbol", "ticker", "etf"],
+    "fund_name": ["fund name", "fund", "theme"],
     "price": ["price"],
     "change_pct": ["change %", "change pct", "change"],
-    "asset_class": ["asset class & sub-class", "asset class", "asset class & sub class"],
+    "asset_class": [
+        "asset class & sub-class",
+        "asset class",
+        "asset class & sub class",
+        "category",
+    ],
     "fund_type": ["fund type"],
     "issuer": ["issuer", "provider"],
-    "inception_date": ["inception date"],
-    "aum": ["aum", "aum ($b)", "aum ($mm)", "aum ($m)", "aum (usd)"],
-    "expense_ratio": ["expense ratio", "expense"],
+    "inception_date": ["inception date", "inception"],
+    "aum": ["aum", "aum ($b)", "aum ($mm)", "aum ($m)", "aum (usd)", "aum_billions"],
+    "expense_ratio": ["expense ratio", "expense", "expense_ratio"],
     "quant_rating": ["quant rating"],
     "sa_rating": ["sa analyst ratings", "analyst rating"],
-    "perf_1y": ["1y perf", "1y %", "1y perf %", "1 year perf"],
+    "perf_1y": ["1y perf", "1y %", "1y perf %", "1 year perf", "1y_percent"],
     "perf_3y": ["3y perf", "3 year perf"],
-    "return_3y": ["3y total return"],
-    "perf_5y": ["5y perf"],
-    "return_5y": ["5y total return"],
-    "perf_10y": ["10y perf"],
+    "return_3y": ["3y total return", "3y_total_return_percent"],
+    "perf_5y": ["5y perf", "5 year perf"],
+    "return_5y": ["5y total return", "5y_total_return_percent"],
+    "perf_10y": ["10y perf", "10 year perf"],
     "return_10y": ["10y total return"],
-    "ytd_perf": ["ytd perf", "ytd %"],
+    "ytd_perf": ["ytd perf", "ytd %", "ytd_percent"],
     "top10_weight": [
         "% top 10",
         "% top 10 holdings",
         "top 10 holdings",
         "top 10 weight",
+        "top_10_weight_percent",
     ],
-    "holdings_count": ["holdings", "# holdings", "number of holdings"],
+    "holdings_count": [
+        "holdings",
+        "# holdings",
+        "#holdings",
+        "number of holdings",
+    ],
     "div_growth_5y": ["div growth 5y"],
     "div_growth_3y": ["div growth 3y"],
     "yield_fwd": ["yield fwd"],
-    "yield_ttm": ["yield ttm"],
-    "frequency": ["frequency", "distribution frequency"],
+    "yield_ttm": ["yield ttm", "dividend_yield_percent"],
+    "frequency": ["frequency", "distribution frequency", "rebalance"],
     "beta_60m": ["60m beta", "beta"],
     "days_quant": ["days at quant rating"],
 }
@@ -166,12 +177,14 @@ def clean_etf_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, ColumnMap]:
     df = df.copy()
     colmap = ColumnMap()
     rename_dict: Dict[str, str] = {}
+    source_columns: Dict[str, str] = {}
 
     for canonical, candidates in CANONICAL_COLUMNS.items():
         match = _find_column(df, candidates)
         if match:
             rename_dict[match] = canonical
             setattr(colmap, canonical, canonical)
+            source_columns[canonical] = match
 
     df = df.rename(columns=rename_dict)
 
@@ -196,6 +209,9 @@ def clean_etf_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, ColumnMap]:
             df[col_name] = _normalize_numeric(df[col_name], to_percent=False)
 
     if "aum" in df.columns:
+        source_name = source_columns.get("aum", "")
+        if source_name and "billion" in source_name.lower():
+            df["aum"] = df["aum"] * 1_000_000_000
         df["aum_billions"] = df["aum"] / 1_000_000_000
 
     if "inception_date" in df.columns:
