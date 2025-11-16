@@ -466,12 +466,14 @@ etf_df, columns_map = clean_etf_sheet(raw_df)
 st.sidebar.header("Data source")
 uploaded_file = st.sidebar.file_uploader("Upload Excel workbook", type=["xlsx"])
 default_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
+workbook: Optional[Dict[str, pd.DataFrame]] = None
 
 if uploaded_file is not None:
     workbook = load_excel(uploaded_file)
 elif os.path.exists(default_path):
     workbook = load_excel(default_path)
-else:
+
+if workbook is None:
     st.error(
         "No Excel file found. Upload a workbook or include "
         "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx in the project."
