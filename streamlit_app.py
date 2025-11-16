@@ -12,11 +12,12 @@ from __future__ import annotations
 import io
 import os
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Union
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from openpyxl import load_workbook
 
 
 st.set_page_config(
@@ -53,7 +54,13 @@ CANONICAL_COLUMNS: Dict[str, Iterable[str]] = {
     "perf_10y": ["10y perf"],
     "return_10y": ["10y total return"],
     "ytd_perf": ["ytd perf", "ytd %"],
-    "top10_weight": ["% top 10 holdings", "top 10 holdings", "top 10 weight"],
+    "top10_weight": [
+        "% top 10",
+        "% top 10 holdings",
+        "top 10 holdings",
+        "top 10 weight",
+    ],
+    "holdings_count": ["holdings", "# holdings", "number of holdings"],
     "div_growth_5y": ["div growth 5y"],
     "div_growth_3y": ["div growth 3y"],
     "yield_fwd": ["yield fwd"],
@@ -107,6 +114,7 @@ class ColumnMap:
     return_10y: Optional[str] = None
     ytd_perf: Optional[str] = None
     top10_weight: Optional[str] = None
+    holdings_count: Optional[str] = None
     div_growth_5y: Optional[str] = None
     div_growth_3y: Optional[str] = None
     yield_fwd: Optional[str] = None
@@ -179,10 +187,67 @@ def clean_etf_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, ColumnMap]:
     return df, colmap
 
 
+def _ensure_bytes_buffer(source: Union[str, os.PathLike, io.BytesIO, bytes]) -> tuple[Union[str, os.PathLike, io.BytesIO], Optional[bytes]]:
+    """Return an object pandas can read plus raw bytes for fallback."""
+
+    if isinstance(source, (str, os.PathLike)):
+        return source, None
+
+    if isinstance(source, bytes):
+        buffer = io.BytesIO(source)
+        return buffer, source
+
+    if isinstance(source, io.BytesIO):
+        raw = source.getvalue()
+        return io.BytesIO(raw), raw
+
+    if hasattr(source, "getvalue"):
+        raw = source.getvalue()
+        return io.BytesIO(raw), raw
+
+    if hasattr(source, "read"):
+        pos = source.tell() if hasattr(source, "tell") else None
+        raw = source.read()
+        if pos is not None:
+            source.seek(pos)
+        return io.BytesIO(raw), raw
+
+    raise TypeError("Unsupported data source for Excel loading")
+
+
+def _load_with_openpyxl(source: Union[str, os.PathLike, io.BytesIO]) -> Dict[str, pd.DataFrame]:
+    workbook = load_workbook(source, read_only=True, data_only=True, keep_links=False)
+    frames: Dict[str, pd.DataFrame] = {}
+    for ws in workbook.worksheets:
+        rows = list(ws.values)
+        if not rows:
+            frames[ws.title] = pd.DataFrame()
+            continue
+        header = rows[0]
+        data = rows[1:]
+        frames[ws.title] = pd.DataFrame(data, columns=header)
+    return frames
+
+
 @st.cache_data(show_spinner=False)
-def load_excel(path: str | io.BytesIO) -> Dict[str, pd.DataFrame]:
-    xls = pd.ExcelFile(path)
-    return {sheet: pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names}
+def load_excel(path: Union[str, os.PathLike, io.BytesIO, bytes]) -> Dict[str, pd.DataFrame]:
+    prepared, raw_bytes = _ensure_bytes_buffer(path)
+    try:
+        xls = pd.ExcelFile(prepared, engine="openpyxl")
+        return {sheet: pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names}
+    except ValueError as exc:
+        # Certain workbooks include conditional-format operators unsupported by
+        # openpyxl's parser.  Fall back to loading via openpyxl directly so we
+        # can ignore the problematic formatting while keeping the cell values.
+        if "Value must be one of" not in str(exc) and "Conditional Formatting" not in str(exc):
+            raise
+        fallback_source: Union[str, os.PathLike, io.BytesIO]
+        if isinstance(prepared, (str, os.PathLike)):
+            fallback_source = prepared
+        else:
+            buffer_bytes = raw_bytes if raw_bytes is not None else prepared.getvalue()
+            fallback_source = io.BytesIO(buffer_bytes)
+        return _load_with_openpyxl(fallback_source)
 
 
 def format_percent(value: float | int | str, decimals: int = 1) -> str:
