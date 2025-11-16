@@ -422,6 +422,9 @@ if etf_df.empty:
     st.error("The selected sheet does not contain data.")
     st.stop()
 
+asset_classes = build_filter_options(columns_map.asset_class)
+fund_types = build_filter_options(columns_map.fund_type)
+issuers = build_filter_options(columns_map.issuer)
 
 # Sidebar filters -----------------------------------------------------------
 def build_filter_options(column: Optional[str]) -> List[str]:
