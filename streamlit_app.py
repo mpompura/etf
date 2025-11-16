@@ -14,6 +14,7 @@ import os
 import re
 import zipfile
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Dict, Iterable, List, Optional, Union
 
 import pandas as pd
@@ -82,6 +83,8 @@ CANONICAL_COLUMNS: Dict[str, Iterable[str]] = {
     "beta_60m": ["60m beta", "beta"],
     "days_quant": ["days at quant rating"],
 }
+
+DISPLAY_MISSING_VALUES = {"-", "—", "na", "n/a", "N/A", "NA", ""}
 
 PERCENT_COLUMNS = {
     "change_pct",
@@ -427,10 +430,38 @@ def build_filter_options(df: pd.DataFrame, column: Optional[str]) -> List[str]:
     return []
 
 
+def sanitize_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert object columns into Arrow-friendly dtypes for st.dataframe."""
+
+    if df.empty:
+        return df
+
+    replacements = {val: pd.NA for val in DISPLAY_MISSING_VALUES}
+    safe = df.copy()
+    for column in safe.columns:
+        series = safe[column]
+        if pd.api.types.is_object_dtype(series):
+            series = series.replace(replacements)
+            if series.map(lambda v: isinstance(v, (datetime, date, pd.Timestamp))).any():
+                safe[column] = pd.to_datetime(series, errors="coerce")
+                continue
+            numeric = pd.to_numeric(series, errors="coerce")
+            if numeric.notna().mean() > 0.6:
+                safe[column] = numeric
+            else:
+                safe[column] = series.astype("string")
+        else:
+            safe[column] = series
+    return safe
+
+
 # ---------------------------------------------------------------------------
 # Sidebar (data source + filters)
 # ---------------------------------------------------------------------------
 
+sheet_name = st.sidebar.selectbox("Sheet for ETF analytics", list(workbook.keys()))
+raw_df = workbook[sheet_name]
+etf_df, columns_map = clean_etf_sheet(raw_df)
 
 st.sidebar.header("Data source")
 uploaded_file = st.sidebar.file_uploader("Upload Excel workbook", type=["xlsx"])
@@ -564,7 +595,7 @@ with overview_tab:
             title=None,
         )
         fig.update_layout(showlegend=False, height=420)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     if columns_map.perf_1y and columns_map.aum and columns_map.asset_class:
         st.subheader("Performance vs. Fund Size")
@@ -579,14 +610,14 @@ with overview_tab:
                 labels={columns_map.perf_1y: "1Y Performance", columns_map.aum: "AUM"},
             )
             scatter.update_layout(height=420)
-            st.plotly_chart(scatter, use_container_width=True)
+            st.plotly_chart(scatter, width="stretch")
 
     st.markdown("### Filtered ETFs")
     display_df = filtered.copy()
     for col in PERCENT_COLUMNS:
         if col in display_df.columns:
             display_df[col] = display_df[col].map(lambda x: format_percent(x, 2))
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width="stretch", hide_index=True)
 
     csv_buffer = io.StringIO()
     filtered.to_csv(csv_buffer, index=False)
@@ -595,7 +626,7 @@ with overview_tab:
         data=csv_buffer.getvalue(),
         file_name="filtered_etfs.csv",
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -610,7 +641,7 @@ with risk_tab:
             nbins=25,
             title="Beta distribution",
         )
-        col_a.plotly_chart(hist, use_container_width=True)
+        col_a.plotly_chart(hist, width="stretch")
 
     scatter_source = prepare_chart_data(
         filtered,
@@ -627,7 +658,7 @@ with risk_tab:
             hover_data=hover_columns(scatter_source, columns_map),
             labels={columns_map.beta_60m: "60M Beta", columns_map.perf_1y: "1Y Performance"},
         )
-        col_b.plotly_chart(scatter_risk, use_container_width=True)
+        col_b.plotly_chart(scatter_risk, width="stretch")
 
     if columns_map.expense_ratio and columns_map.yield_ttm:
         st.subheader("Income vs. Cost")
@@ -646,7 +677,7 @@ with risk_tab:
                     columns_map.yield_ttm: "Yield TTM",
                 },
             )
-            st.plotly_chart(income_chart, use_container_width=True)
+            st.plotly_chart(income_chart, width="stretch")
 
     st.markdown("#### Risk table")
     risk_cols = [
@@ -670,7 +701,7 @@ with risk_tab:
         risk_table[columns_map.expense_ratio] = risk_table[columns_map.expense_ratio].map(
             lambda x: format_percent(x, 2)
         )
-    st.dataframe(risk_table, use_container_width=True, hide_index=True)
+    st.dataframe(risk_table, width="stretch", hide_index=True)
 
 
 with income_tab:
@@ -695,7 +726,7 @@ with income_tab:
                 columns_map.div_growth_3y: "Dividend growth 3Y",
             },
         )
-        col_income_a.plotly_chart(fig_income, use_container_width=True)
+        col_income_a.plotly_chart(fig_income, width="stretch")
 
     if columns_map.yield_ttm:
         top_income = filtered.dropna(subset=[columns_map.yield_ttm]).nlargest(
@@ -711,7 +742,7 @@ with income_tab:
                 color=columns_map.asset_class if columns_map.asset_class in top_income.columns else None,
                 title="Top 10 yields",
             )
-            col_income_b.plotly_chart(bar_income, use_container_width=True)
+            col_income_b.plotly_chart(bar_income, width="stretch")
 
     stats_cols = [
         col
@@ -725,7 +756,7 @@ with income_tab:
     ]
     if stats_cols:
         summary = filtered[stats_cols].describe().T
-        st.dataframe(summary, use_container_width=True)
+        st.dataframe(summary, width="stretch")
 
 
 with concentration_tab:
@@ -745,7 +776,7 @@ with concentration_tab:
                 columns_map.top10_weight: "Weight of top 10",
             },
         )
-        st.plotly_chart(conc_chart, use_container_width=True)
+        st.plotly_chart(conc_chart, width="stretch")
 
     if columns_map.top10_weight:
         most_concentrated = filtered.dropna(subset=[columns_map.top10_weight]).nlargest(
@@ -761,7 +792,7 @@ with concentration_tab:
             st.dataframe(
                 most_concentrated[display_cols],
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
 
 
@@ -794,10 +825,10 @@ with issuer_tab:
                 y="AUM (Billions)",
                 hover_data=hover_cols,
             )
-            st.plotly_chart(fig_issuer, use_container_width=True)
+            st.plotly_chart(fig_issuer, width="stretch")
             st.dataframe(
                 issuer_group,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -813,7 +844,7 @@ with quality_tab:
             nbins=20,
             title="Quant rating distribution",
         )
-        q_col1.plotly_chart(quant_hist, use_container_width=True)
+        q_col1.plotly_chart(quant_hist, width="stretch")
 
     quality_source = prepare_chart_data(
         filtered, [columns_map.quant_rating, columns_map.sa_rating]
@@ -830,7 +861,7 @@ with quality_tab:
                 columns_map.sa_rating: "SA analyst rating",
             },
         )
-        q_col2.plotly_chart(quality_scatter, use_container_width=True)
+        q_col2.plotly_chart(quality_scatter, width="stretch")
 
     radar_entries = []
     metric_map = [
@@ -851,7 +882,7 @@ with quality_tab:
             theta="Metric",
             line_close=True,
         )
-        st.plotly_chart(radar_fig, use_container_width=True)
+        st.plotly_chart(radar_fig, width="stretch")
 
 
 with heatmap_tab:
@@ -884,7 +915,7 @@ with heatmap_tab:
                 color_continuous_scale="RdYlGn",
                 labels=dict(color="Performance"),
             )
-            st.plotly_chart(heatmap_fig, use_container_width=True)
+            st.plotly_chart(heatmap_fig, width="stretch")
 
 
 with cost_tab:
@@ -898,7 +929,7 @@ with cost_tab:
             points="all",
             title="Expense ratio spread",
         )
-        cost_cols[0].plotly_chart(expense_box, use_container_width=True)
+        cost_cols[0].plotly_chart(expense_box, width="stretch")
 
     if columns_map.aum and columns_map.expense_ratio:
         cost_source = prepare_chart_data(
@@ -917,7 +948,7 @@ with cost_tab:
                     columns_map.aum: "AUM",
                 },
             )
-            cost_cols[1].plotly_chart(bubble, use_container_width=True)
+            cost_cols[1].plotly_chart(bubble, width="stretch")
 
     if columns_map.aum and columns_map.aum in filtered.columns:
         aum_hist = px.histogram(
@@ -926,7 +957,7 @@ with cost_tab:
             nbins=30,
             title="Liquidity (AUM) distribution",
         )
-        st.plotly_chart(aum_hist, use_container_width=True)
+        st.plotly_chart(aum_hist, width="stretch")
 
 
 with top_tab:
@@ -978,7 +1009,7 @@ with top_tab:
             if col in table.columns:
                 table[col] = table[col].map(lambda x: format_percent(x, 2))
         table["ETF Score"] = table["ETF Score"].map(lambda x: f"{x:.3f}")
-        st.dataframe(table, hide_index=True, use_container_width=True)
+        st.dataframe(table, hide_index=True, width="stretch")
 
         bar = px.bar(
             top10,
@@ -988,7 +1019,7 @@ with top_tab:
             hover_data=[columns_map.fund_name] if columns_map.fund_name in top10.columns else None,
         )
         bar.update_layout(height=420)
-        st.plotly_chart(bar, use_container_width=True)
+        st.plotly_chart(bar, width="stretch")
     else:
         st.info("No ETFs remain after filtering.")
 
@@ -996,5 +1027,6 @@ with top_tab:
 with data_tab:
     st.subheader("Raw workbook preview")
     selected_sheet = st.selectbox("Preview sheet", list(workbook.keys()), index=list(workbook.keys()).index(sheet_name))
-    st.dataframe(workbook[selected_sheet], use_container_width=True, hide_index=True)
+    safe_sheet = sanitize_for_display(workbook[selected_sheet])
+    st.dataframe(safe_sheet, width="stretch", hide_index=True)
 
