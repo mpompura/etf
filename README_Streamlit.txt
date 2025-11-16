@@ -14,19 +14,20 @@ streamlit run streamlit_app.py
 
 ## Run inside Docker Desktop
 
-Build a minimal image with Streamlit installed and bind-mount this repository
-inside the container so the Excel workbook and app are available.
+The repo now includes a `Dockerfile` so you can build a self-contained image
+with all dependencies and assets (including the Excel workbook) baked in.
 
 ```bash
-docker run --rm \
-  -p 8501:8501 \
-  -v "$PWD":/app \
-  -w /app \
-  python:3.11-slim \
-  bash -c "pip install -r requirements.txt && streamlit run streamlit_app.py --server.port=8501 --server.address=0.0.0.0"
+# Build the image once
+docker build -t etf-lab .
+
+# Launch the dashboard
+docker run --rm -p 8501:8501 etf-lab
 ```
 
-Then open http://localhost:8501 in your browser.
+Then open http://localhost:8501 in your browser. Hot-reload is provided by
+Streamlit inside the container, so rebuilding is only required when
+dependencies change.
 
 ## Features
 
