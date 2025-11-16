@@ -89,6 +89,14 @@ PERCENT_COLUMNS = {
     "yield_ttm",
 }
 
+FORCE_PERCENT_COLUMNS = {
+    "expense_ratio",
+    "div_growth_5y",
+    "div_growth_3y",
+    "yield_fwd",
+    "yield_ttm",
+}
+
 
 @dataclass
 class ColumnMap:
@@ -126,7 +134,9 @@ class ColumnMap:
     days_quant: Optional[str] = None
 
 
-def _normalize_numeric(series: pd.Series, to_percent: bool = False) -> pd.Series:
+def _normalize_numeric(
+    series: pd.Series, to_percent: bool = False, force_percent: bool = False
+) -> pd.Series:
     cleaned = (
         series.astype(str)
         .str.replace(r"[,$%]", "", regex=True)
@@ -134,8 +144,10 @@ def _normalize_numeric(series: pd.Series, to_percent: bool = False) -> pd.Series
         .str.strip()
     )
     numeric = pd.to_numeric(cleaned, errors="coerce")
-    if to_percent and numeric.abs().max(skipna=True) > 2:
-        numeric = numeric / 100.0
+    if to_percent:
+        max_val = numeric.abs().max(skipna=True)
+        if force_percent or (not pd.isna(max_val) and max_val > 2):
+            numeric = numeric / 100.0
     return numeric
 
 
@@ -165,7 +177,10 @@ def clean_etf_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, ColumnMap]:
 
     for col_name in PERCENT_COLUMNS:
         if col_name in df.columns:
-            df[col_name] = _normalize_numeric(df[col_name], to_percent=True)
+            force = col_name in FORCE_PERCENT_COLUMNS
+            df[col_name] = _normalize_numeric(
+                df[col_name], to_percent=True, force_percent=force
+            )
 
     numeric_cols = [
         "price",
@@ -310,6 +325,34 @@ def min_max_scale(series: pd.Series) -> pd.Series:
     return scaled.fillna(0.0)
 
 
+def prepare_chart_data(
+    df: pd.DataFrame,
+    required_columns: Iterable[Optional[str]],
+    size_column: Optional[str] = None,
+) -> Optional[pd.DataFrame]:
+    cols = [c for c in required_columns if c]
+    if not cols:
+        return None
+    subset = df.dropna(subset=cols)
+    if subset.empty:
+        return None
+    subset = subset.copy()
+    if size_column and size_column in subset.columns:
+        subset.loc[:, size_column] = subset[size_column].fillna(0)
+    return subset
+
+
+def pick_identifier(df: pd.DataFrame, cols: ColumnMap) -> Optional[str]:
+    for candidate in (cols.symbol, cols.fund_name):
+        if candidate and candidate in df.columns:
+            return candidate
+    return None
+
+
+def hover_columns(df: pd.DataFrame, cols: ColumnMap) -> List[str]:
+    return [c for c in (cols.symbol, cols.fund_name) if c and c in df.columns]
+
+
 def build_score(df: pd.DataFrame, weights: Dict[str, float], cols: ColumnMap) -> pd.Series:
     def _mean_of(columns: List[Optional[str]]) -> pd.Series:
         frames = [df[c] for c in columns if c in df.columns]
@@ -379,6 +422,9 @@ if etf_df.empty:
     st.error("The selected sheet does not contain data.")
     st.stop()
 
+asset_classes = build_filter_options(columns_map.asset_class)
+fund_types = build_filter_options(columns_map.fund_type)
+issuers = build_filter_options(columns_map.issuer)
 
 # Sidebar filters -----------------------------------------------------------
 def build_filter_options(column: Optional[str]) -> List[str]:
@@ -449,8 +495,30 @@ else:
 
 # Tabs ----------------------------------------------------------------------
 
-overview_tab, risk_tab, top_tab, data_tab = st.tabs(
-    ["Overview", "Risk & Performance", "Top 10 ETFs", "Raw Data"]
+(
+    overview_tab,
+    risk_tab,
+    income_tab,
+    concentration_tab,
+    issuer_tab,
+    quality_tab,
+    heatmap_tab,
+    cost_tab,
+    top_tab,
+    data_tab,
+) = st.tabs(
+    [
+        "Overview",
+        "Risk & Performance",
+        "Income & Dividends",
+        "Concentration",
+        "Issuer Spotlight",
+        "Quality Radar",
+        "Performance Heatmap",
+        "Cost & Liquidity",
+        "Top 10 ETFs",
+        "Raw Data",
+    ]
 )
 
 
@@ -477,16 +545,18 @@ with overview_tab:
 
     if columns_map.perf_1y and columns_map.aum and columns_map.asset_class:
         st.subheader("Performance vs. Fund Size")
-        scatter = px.scatter(
-            filtered,
-            x=columns_map.perf_1y,
-            y=columns_map.aum,
-            color=columns_map.asset_class,
-            hover_data=[columns_map.symbol, columns_map.fund_name],
-            labels={columns_map.perf_1y: "1Y Performance", columns_map.aum: "AUM"},
-        )
-        scatter.update_layout(height=420)
-        st.plotly_chart(scatter, use_container_width=True)
+        perf_source = prepare_chart_data(filtered, [columns_map.perf_1y, columns_map.aum])
+        if perf_source is not None:
+            scatter = px.scatter(
+                perf_source,
+                x=columns_map.perf_1y,
+                y=columns_map.aum,
+                color=columns_map.asset_class if columns_map.asset_class in perf_source.columns else None,
+                hover_data=hover_columns(perf_source, columns_map),
+                labels={columns_map.perf_1y: "1Y Performance", columns_map.aum: "AUM"},
+            )
+            scatter.update_layout(height=420)
+            st.plotly_chart(scatter, use_container_width=True)
 
     st.markdown("### Filtered ETFs")
     display_df = filtered.copy()
@@ -519,32 +589,41 @@ with risk_tab:
         )
         col_a.plotly_chart(hist, use_container_width=True)
 
-    if columns_map.beta_60m and columns_map.perf_1y:
+    scatter_source = prepare_chart_data(
+        filtered,
+        [columns_map.beta_60m, columns_map.perf_1y],
+        size_column=columns_map.aum if columns_map.aum in filtered.columns else None,
+    )
+    if scatter_source is not None:
         scatter_risk = px.scatter(
-            filtered,
+            scatter_source,
             x=columns_map.beta_60m,
             y=columns_map.perf_1y,
-            size=columns_map.aum if columns_map.aum in filtered.columns else None,
-            color=columns_map.asset_class if columns_map.asset_class in filtered.columns else None,
-            hover_data=[columns_map.symbol, columns_map.fund_name],
+            size=columns_map.aum if columns_map.aum in scatter_source.columns else None,
+            color=columns_map.asset_class if columns_map.asset_class in scatter_source.columns else None,
+            hover_data=hover_columns(scatter_source, columns_map),
             labels={columns_map.beta_60m: "60M Beta", columns_map.perf_1y: "1Y Performance"},
         )
         col_b.plotly_chart(scatter_risk, use_container_width=True)
 
     if columns_map.expense_ratio and columns_map.yield_ttm:
         st.subheader("Income vs. Cost")
-        income_chart = px.scatter(
-            filtered,
-            x=columns_map.expense_ratio,
-            y=columns_map.yield_ttm,
-            color=columns_map.asset_class if columns_map.asset_class in filtered.columns else None,
-            hover_data=[columns_map.symbol, columns_map.fund_name],
-            labels={
-                columns_map.expense_ratio: "Expense Ratio",
-                columns_map.yield_ttm: "Yield TTM",
-            },
+        inc_source = prepare_chart_data(
+            filtered, [columns_map.expense_ratio, columns_map.yield_ttm]
         )
-        st.plotly_chart(income_chart, use_container_width=True)
+        if inc_source is not None:
+            income_chart = px.scatter(
+                inc_source,
+                x=columns_map.expense_ratio,
+                y=columns_map.yield_ttm,
+                color=columns_map.asset_class if columns_map.asset_class in inc_source.columns else None,
+                hover_data=hover_columns(inc_source, columns_map),
+                labels={
+                    columns_map.expense_ratio: "Expense Ratio",
+                    columns_map.yield_ttm: "Yield TTM",
+                },
+            )
+            st.plotly_chart(income_chart, use_container_width=True)
 
     st.markdown("#### Risk table")
     risk_cols = [
@@ -569,6 +648,262 @@ with risk_tab:
             lambda x: format_percent(x, 2)
         )
     st.dataframe(risk_table, use_container_width=True, hide_index=True)
+
+
+with income_tab:
+    st.subheader("Income & dividend dashboard")
+    col_income_a, col_income_b = st.columns(2)
+
+    income_scatter = prepare_chart_data(
+        filtered,
+        [columns_map.yield_ttm, columns_map.div_growth_3y],
+        size_column=columns_map.aum if columns_map.aum in filtered.columns else None,
+    )
+    if income_scatter is not None:
+        fig_income = px.scatter(
+            income_scatter,
+            x=columns_map.yield_ttm,
+            y=columns_map.div_growth_3y,
+            size=columns_map.aum if columns_map.aum in income_scatter.columns else None,
+            color=columns_map.asset_class if columns_map.asset_class in income_scatter.columns else None,
+            hover_data=hover_columns(income_scatter, columns_map),
+            labels={
+                columns_map.yield_ttm: "Yield TTM",
+                columns_map.div_growth_3y: "Dividend growth 3Y",
+            },
+        )
+        col_income_a.plotly_chart(fig_income, use_container_width=True)
+
+    if columns_map.yield_ttm:
+        top_income = filtered.dropna(subset=[columns_map.yield_ttm]).nlargest(
+            10, columns_map.yield_ttm
+        )
+        if not top_income.empty:
+            income_identifier = pick_identifier(top_income, columns_map)
+            x_axis = income_identifier if income_identifier else top_income.index.astype(str)
+            bar_income = px.bar(
+                top_income,
+                x=x_axis,
+                y=columns_map.yield_ttm,
+                color=columns_map.asset_class if columns_map.asset_class in top_income.columns else None,
+                title="Top 10 yields",
+            )
+            col_income_b.plotly_chart(bar_income, use_container_width=True)
+
+    stats_cols = [
+        col
+        for col in [
+            columns_map.yield_ttm,
+            columns_map.yield_fwd,
+            columns_map.div_growth_3y,
+            columns_map.div_growth_5y,
+        ]
+        if col in filtered.columns
+    ]
+    if stats_cols:
+        summary = filtered[stats_cols].describe().T
+        st.dataframe(summary, use_container_width=True)
+
+
+with concentration_tab:
+    st.subheader("Concentration & holdings analysis")
+    scatter_conc = prepare_chart_data(
+        filtered, [columns_map.holdings_count, columns_map.top10_weight]
+    )
+    if scatter_conc is not None:
+        conc_chart = px.scatter(
+            scatter_conc,
+            x=columns_map.holdings_count,
+            y=columns_map.top10_weight,
+            color=columns_map.asset_class if columns_map.asset_class in scatter_conc.columns else None,
+            hover_data=hover_columns(scatter_conc, columns_map),
+            labels={
+                columns_map.holdings_count: "Number of holdings",
+                columns_map.top10_weight: "Weight of top 10",
+            },
+        )
+        st.plotly_chart(conc_chart, use_container_width=True)
+
+    if columns_map.top10_weight:
+        most_concentrated = filtered.dropna(subset=[columns_map.top10_weight]).nlargest(
+            10, columns_map.top10_weight
+        )
+        if not most_concentrated.empty:
+            st.markdown("#### Most concentrated funds")
+            display_cols = [
+                c
+                for c in [columns_map.symbol, columns_map.fund_name, columns_map.top10_weight]
+                if c and c in most_concentrated.columns
+            ]
+            st.dataframe(
+                most_concentrated[display_cols],
+                hide_index=True,
+                use_container_width=True,
+            )
+
+
+with issuer_tab:
+    st.subheader("Issuer spotlight")
+    if columns_map.issuer and columns_map.aum:
+        agg_map = {columns_map.aum: "sum"}
+        if columns_map.perf_1y:
+            agg_map[columns_map.perf_1y] = "mean"
+        if columns_map.expense_ratio:
+            agg_map[columns_map.expense_ratio] = "mean"
+        rename_map = {columns_map.aum: "total_aum"}
+        if columns_map.perf_1y:
+            rename_map[columns_map.perf_1y] = "avg_perf"
+        if columns_map.expense_ratio:
+            rename_map[columns_map.expense_ratio] = "avg_expense"
+        issuer_group = (
+            filtered.groupby(columns_map.issuer)
+            .agg(agg_map)
+            .reset_index()
+            .rename(columns=rename_map)
+            .sort_values("total_aum", ascending=False)
+        )
+        if not issuer_group.empty:
+            issuer_group["AUM (Billions)"] = issuer_group["total_aum"] / 1_000_000_000
+            hover_cols = [c for c in ["avg_perf", "avg_expense"] if c in issuer_group.columns]
+            fig_issuer = px.bar(
+                issuer_group.head(15),
+                x=columns_map.issuer,
+                y="AUM (Billions)",
+                hover_data=hover_cols,
+            )
+            st.plotly_chart(fig_issuer, use_container_width=True)
+            st.dataframe(
+                issuer_group,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+with quality_tab:
+    st.subheader("Quality radar")
+    q_col1, q_col2 = st.columns(2)
+
+    if columns_map.quant_rating and columns_map.quant_rating in filtered.columns:
+        quant_hist = px.histogram(
+            filtered,
+            x=columns_map.quant_rating,
+            nbins=20,
+            title="Quant rating distribution",
+        )
+        q_col1.plotly_chart(quant_hist, use_container_width=True)
+
+    quality_source = prepare_chart_data(
+        filtered, [columns_map.quant_rating, columns_map.sa_rating]
+    )
+    if quality_source is not None:
+        quality_scatter = px.scatter(
+            quality_source,
+            x=columns_map.quant_rating,
+            y=columns_map.sa_rating,
+            color=columns_map.asset_class if columns_map.asset_class in quality_source.columns else None,
+            hover_data=hover_columns(quality_source, columns_map),
+            labels={
+                columns_map.quant_rating: "Quant rating",
+                columns_map.sa_rating: "SA analyst rating",
+            },
+        )
+        q_col2.plotly_chart(quality_scatter, use_container_width=True)
+
+    radar_entries = []
+    metric_map = [
+        ("Quant rating", columns_map.quant_rating),
+        ("SA rating", columns_map.sa_rating),
+        ("Dividend growth 5Y", columns_map.div_growth_5y),
+        ("Dividend growth 3Y", columns_map.div_growth_3y),
+        ("Yield TTM", columns_map.yield_ttm),
+    ]
+    for label, col in metric_map:
+        if col and col in filtered.columns:
+            radar_entries.append({"Metric": label, "Score": filtered[col].mean()})
+    if radar_entries:
+        radar_df = pd.DataFrame(radar_entries)
+        radar_fig = px.line_polar(
+            radar_df,
+            r="Score",
+            theta="Metric",
+            line_close=True,
+        )
+        st.plotly_chart(radar_fig, use_container_width=True)
+
+
+with heatmap_tab:
+    st.subheader("Performance heatmap")
+    perf_cols = [
+        col
+        for col in [
+            columns_map.ytd_perf,
+            columns_map.perf_1y,
+            columns_map.perf_3y,
+            columns_map.perf_5y,
+            columns_map.perf_10y,
+            columns_map.return_3y,
+            columns_map.return_5y,
+            columns_map.return_10y,
+        ]
+        if col in filtered.columns
+    ]
+    if perf_cols:
+        identifier = pick_identifier(filtered, columns_map)
+        selected_cols = ([identifier] if identifier else []) + perf_cols
+        heatmap_df = filtered[selected_cols].dropna(subset=perf_cols, how="all")
+        if identifier and identifier in heatmap_df.columns:
+            heatmap_df = heatmap_df.set_index(identifier)
+        heatmap_df = heatmap_df.head(40)
+        if not heatmap_df.empty:
+            heatmap_fig = px.imshow(
+                heatmap_df,
+                aspect="auto",
+                color_continuous_scale="RdYlGn",
+                labels=dict(color="Performance"),
+            )
+            st.plotly_chart(heatmap_fig, use_container_width=True)
+
+
+with cost_tab:
+    st.subheader("Cost & liquidity diagnostics")
+    cost_cols = st.columns(2)
+
+    if columns_map.expense_ratio:
+        expense_box = px.box(
+            filtered,
+            y=columns_map.expense_ratio,
+            points="all",
+            title="Expense ratio spread",
+        )
+        cost_cols[0].plotly_chart(expense_box, use_container_width=True)
+
+    if columns_map.aum and columns_map.expense_ratio:
+        cost_source = prepare_chart_data(
+            filtered, [columns_map.aum, columns_map.expense_ratio], columns_map.aum
+        )
+        if cost_source is not None:
+            bubble = px.scatter(
+                cost_source,
+                x=columns_map.expense_ratio,
+                y=columns_map.aum,
+                size=columns_map.aum,
+                color=columns_map.asset_class if columns_map.asset_class in cost_source.columns else None,
+                hover_data=hover_columns(cost_source, columns_map),
+                labels={
+                    columns_map.expense_ratio: "Expense ratio",
+                    columns_map.aum: "AUM",
+                },
+            )
+            cost_cols[1].plotly_chart(bubble, use_container_width=True)
+
+    if columns_map.aum and columns_map.aum in filtered.columns:
+        aum_hist = px.histogram(
+            filtered,
+            x="aum_billions" if "aum_billions" in filtered.columns else columns_map.aum,
+            nbins=30,
+            title="Liquidity (AUM) distribution",
+        )
+        st.plotly_chart(aum_hist, use_container_width=True)
 
 
 with top_tab:
@@ -624,7 +959,7 @@ with top_tab:
 
         bar = px.bar(
             top10,
-            x=columns_map.symbol if columns_map.symbol else columns_map.fund_name,
+            x=pick_identifier(top10, columns_map) or top10.index,
             y="ETF Score",
             color=columns_map.asset_class if columns_map.asset_class in top10.columns else None,
             hover_data=[columns_map.fund_name] if columns_map.fund_name in top10.columns else None,

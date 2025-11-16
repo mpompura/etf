@@ -32,17 +32,28 @@ dependencies change.
 ## Features
 
 - **Flexible data ingestion** – upload any workbook with an `ETFs` sheet or use
-  the bundled sample file. Column names are normalized automatically.
+  the bundled sample file. Column names are normalized automatically and
+  conditional formatting is stripped so even exotic spreadsheets load cleanly.
 - **Filters + search** – slice by Asset Class, Fund Type, Issuer, and ticker or
   fund name search.
-- **Overview tab** – compare AUM by asset class, plot 1Y performance vs. fund
-  size, download the filtered view, and inspect a formatted table.
-- **Risk & Performance tab** – beta histogram, beta vs. returns scatter, and an
-  income-vs-expense view plus a compact risk table.
-- **Top 10 tab** – configurable weights (returns, income, quality, risk) feed a
-  composite score so you can surface the best ETFs from your sheet.
-- **Raw data preview** – inspect any worksheet in the uploaded workbook without
-  leaving the app.
+- **10 purpose-built dashboards** – the tab strip now includes:
+  1. **Overview** (AUM by asset class, performance vs. size, formatted table).
+  2. **Risk & Performance** (beta histogram, beta vs. return bubble, risk
+     table, and income vs. cost plot).
+  3. **Income & Dividends** (yield vs. dividend-growth scatter, top yielders,
+     and descriptive stats).
+  4. **Concentration** (holdings vs. % top-10 scatter and most concentrated
+     funds table).
+  5. **Issuer Spotlight** (issuer-level aggregates with AUM bars and metrics).
+  6. **Quality Radar** (rating histograms, rating scatter, and a radar summary).
+  7. **Performance Heatmap** (multi-horizon performance matrix for up to 40
+     tickers).
+  8. **Cost & Liquidity** (expense box plot, AUM bubble, and AUM distribution).
+  9. **Top 10 ETFs** (configurable scoring engine with sortable table + chart).
+  10. **Raw Data** (worksheet preview for any tab in the uploaded workbook).
+- **Percent normalization fixes** – expense ratio, yield, and dividend-growth
+  inputs are converted to proper percentages so values like `0.50` display as
+  `0.50%` instead of `50%`.
 
 The interface is optimized for the columns listed in the user request (Rank,
 Symbol, Fund Name, Price, Change %, Asset Class & Sub-class, Fund Type, Issuer,
