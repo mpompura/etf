@@ -459,10 +459,6 @@ def sanitize_for_display(df: pd.DataFrame) -> pd.DataFrame:
 # Sidebar (data source + filters)
 # ---------------------------------------------------------------------------
 
-sheet_name = st.sidebar.selectbox("Sheet for ETF analytics", list(workbook.keys()))
-raw_df = workbook[sheet_name]
-etf_df, columns_map = clean_etf_sheet(raw_df)
-
 st.sidebar.header("Data source")
 uploaded_file = st.sidebar.file_uploader("Upload Excel workbook", type=["xlsx"])
 default_path = "AI_Ecosystem_ETFs_Cleaned_for_GoogleSheets.xlsx"
